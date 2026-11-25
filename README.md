@@ -17,6 +17,8 @@
 
 识别带 `excalidraw-plugin` 属性的 Markdown，支持普通 `json` 和压缩的 `compressed-json`，写回保持原有形式。组件只更新绘图数据和必要的文字、链接记录，保留笔记正文、属性、已有元素 ID、本地附件引用与未编辑字段。普通 Markdown 的默认打开方式不变。
 
+笔记代码围栏里的格式示例不算画板。若文件含有多个无法区分的独立绘图块，组件不会写回；先在 Markdown 中确认并整理重复块。
+
 画板显示常见图形、文字和库内已有图片。自定义脚本、网页/笔记/PDF 等高级嵌入不在 Vsidian 画板执行或渲染，原始数据继续保留。首版不提供新图片导入，也不接管其他笔记里的 `![[图]]` 预览。
 
 ## 开发与验证
@@ -36,6 +38,32 @@ node test/native.mjs <阶段> out/roundtrip <Vsidian源码目录> <Code.exe> <Vs
 ```
 
 依次运行 `seed`（Obsidian 生成两种图档）、`vscode`（Vsidian 阅读、绘制、撤销、切换和保存）、`reopen`（Obsidian 重开），以及 `create`、`new`（Vsidian 新画、Obsidian 重开）。Obsidian 插件目录应包含官方发布的 `main.js`、`manifest.json` 和 `styles.css`。记录和截图在测试目录内，不读写日常使用的库。
+
+## 发布到 VS Code Marketplace
+
+CI 在 PR 和 `main` 上跑测试、类型检查和打包。Release 只认 `main` 上已通过 CI 的提交：GitHub Release 附上该提交的 VSIX，Marketplace 再发布同一个文件，不重新构建。
+
+首次配置时，在 GitHub **Settings → Environments** 创建 `marketplace`，部署规则选择 **Selected branches and tags**，只放行 **Tag** 类型的 `v*`。在 [Marketplace 发布者后台](https://marketplace.visualstudio.com/manage) 打开 `ONEGAYI` 的 **Trusted Publishing**，添加一条策略：
+
+| 字段 | 值 |
+| --- | --- |
+| Policy name | `vsidian-excalidraw release` |
+| Repository owner | `ONEGAYI` |
+| Repository | `vsidian-excalidraw` |
+| Workflow | `release.yml` |
+| Environment | `marketplace` |
+
+[Trusted Publishing](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#publish-with-github-actions-and-trusted-publishing) 会给发布步骤发放短期凭据，不需要设置 `VSCE_PAT`。
+
+发版时，确认 `main` 对应提交的 CI 已通过、标签与 `package.json` 版本一致，再推送带发布说明的标签。例如，`main` 版本为 `0.1.0` 时：
+
+```powershell
+git fetch origin
+git tag -a v0.1.0 origin/main -F release-notes.md
+git push origin v0.1.0
+```
+
+先把本版说明写进 `release-notes.md`；它无需提交，标签里的说明会成为 GitHub Release 正文。如果 GitHub Release 已成功、只有 Marketplace 步骤失败，修好策略后在同一次运行里选 **Re-run failed jobs**，不必重打标签。
 
 ## 上游
 

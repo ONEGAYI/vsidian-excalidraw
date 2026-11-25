@@ -44,7 +44,7 @@
     "typecheck": "tsc --noEmit",
     "build": "node build.mjs",
     "compile": "npm run typecheck && npm run build",
-    "package": "vsce package --no-dependencies --out out/",
+    "package": "node -e \"require('node:fs').mkdirSync('out', { recursive: true })\" && vsce package --no-dependencies --out out/",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
@@ -53,7 +53,7 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@types/vscode": "1.82.0",
-    "@vscode/vsce": "4.0.0",
+    "@vscode/vsce": "4.1.1",
     "esbuild": "0.28.2",
     "lz-string": "1.5.0",
     "playwright": "1.62.1",
