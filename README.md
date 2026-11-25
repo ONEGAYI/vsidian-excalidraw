@@ -123,7 +123,7 @@ node test/native.mjs <阶段> out/roundtrip <Vsidian源码目录> <Code.exe> <Vs
 
 CI 在 PR 和 `main` 上跑测试、类型检查和打包。Release 只认 `main` 上已通过 CI 的提交：GitHub Release 附上该提交的 VSIX，Marketplace 再发布同一个文件，不重新构建。
 
-首次配置时，在 GitHub **Settings → Environments** 创建 `marketplace`，部署规则选择 **Selected branches and tags**，只放行 **Tag** 类型的 `v*`。在 [Marketplace 发布者后台](https://marketplace.visualstudio.com/manage) 打开 `ONEGAYI` 的 **Trusted Publishing**，添加一条策略：
+首次配置时，在 GitHub **Settings → Environments** 创建 `marketplace`，部署规则选择 **Selected branches and tags**，分别放行 **Tag** 类型的 `v*` 和 **Branch** 类型的 `main`（手动补发）。在 [Marketplace 发布者后台](https://marketplace.visualstudio.com/manage) 打开 `ONEGAYI` 的 **Trusted Publishing**，添加一条策略：
 
 | 字段 | 值 |
 | --- | --- |
@@ -143,7 +143,10 @@ git tag -a v0.1.0 origin/main -F release-notes.md
 git push origin v0.1.0
 ```
 
-先把本版说明写进 `release-notes.md`；它无需提交，标签里的说明会成为 GitHub Release 正文。如果 GitHub Release 已成功、只有 Marketplace 步骤失败，修好策略后在同一次运行里选 **Re-run failed jobs**，不必重打标签。
+先把本版说明写进 `release-notes.md`；它无需提交，标签里的说明会成为 GitHub Release 正文。
+
+- **还未创建 GitHub Release**：修好工作流后，从 `main` 手动运行 **Release**，输入已有标签。流程会重新核对该标签对应的提交并使用原 CI 产物。
+- **只有 Marketplace 发布失败**：修好策略后，在原运行里选 **Re-run failed jobs**。两种情况都不必重打标签。
 
 ### 上游依赖与授权
 
