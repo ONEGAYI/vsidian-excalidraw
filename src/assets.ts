@@ -1,11 +1,33 @@
 import { basename, extname, posix } from 'node:path'
 import { FileSystemError, RelativePattern, Uri, workspace } from 'vscode'
-import type { Scene } from './format.ts'
+import type { DrawingPatch, Scene } from './format.ts'
+import { imageImportLimit, importedImageTypes, type ImportedImage } from './protocol.ts'
 
 const mimeTypes = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
   '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml',
 } as const
+
+export function stageImportedImages(source: Uri, images: ImportedImage[], patch: DrawingPatch) {
+  if (!Array.isArray(images)) throw new Error('invalid-image-import')
+  const fileIds = new Set(patch.elements.flatMap(({ fields }) =>
+    fields.type === 'image' && !fields.isDeleted && fields.fileId ? [fields.fileId] : []))
+  let total = 0
+  return images.map(({ id, dataURL }) => {
+    if (typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id) || !fileIds.delete(id)
+      || typeof dataURL !== 'string' || dataURL.length > Math.ceil(imageImportLimit / 3) * 4 + 32) {
+      throw new Error('invalid-image-import')
+    }
+    const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+=*)$/.exec(dataURL)
+    if (!match) throw new Error('invalid-image-import')
+    const mime = match[1] as keyof typeof importedImageTypes
+    const bytes = Buffer.from(match[2], 'base64')
+    total += bytes.length
+    if (!bytes.length || total > imageImportLimit) throw new Error('invalid-image-import')
+    const target = `excalidraw-${id}.${importedImageTypes[mime]}`
+    return { id, target, bytes, uri: Uri.joinPath(source, '..', target) }
+  })
+}
 
 export async function localResource(source: Uri, target: string): Promise<Uri | undefined> {
   if (!target || target.startsWith('/') || /[:\\\0*?[\]{}]/.test(target)) return

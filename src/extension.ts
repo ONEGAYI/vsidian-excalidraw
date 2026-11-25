@@ -4,7 +4,7 @@ import {
   commands, env, extensions, Position, Range, TabInputCustom, TabInputText, Uri, window, workspace, WorkspaceEdit,
   type Disposable, type ExtensionContext, type TextDocument, type WebviewPanel,
 } from 'vscode'
-import { localResource, readAssets } from './assets.ts'
+import { localResource, readAssets, stageImportedImages } from './assets.ts'
 import { isDrawing, newDrawing, readDrawing, writeDrawing } from './format.ts'
 import type { Message, Request } from './protocol.ts'
 import { strings } from './strings.ts'
@@ -73,7 +73,8 @@ export async function activate(context: ExtensionContext) {
           report(error)
         }
       }
-      if (!disposed && document.version === version && enabled === state.enabled) await post(state)
+      // Undo/redo can change dirty state while the scene's attachments are being read.
+      if (!disposed && document.version === version && enabled === state.enabled) await post({ ...state, dirty: document.isDirty })
     }
     const refresh = () => { void publish() }
     boards.add(refresh)
@@ -118,9 +119,12 @@ export async function activate(context: ExtensionContext) {
                 return
               }
               const text = document.getText()
-              const edits = writeDrawing(text, msg.patch).sort((a, b) => b.from - a.from || b.to - a.to)
+              const images = msg.images ? stageImportedImages(document.uri, msg.images, msg.patch) : []
+              const attachments = images.map(({ id, target }) => ({ id, target }))
+              const edits = writeDrawing(text, { ...msg.patch, attachments }).sort((a, b) => b.from - a.from || b.to - a.to)
               if (edits.length) {
                 const edit = new WorkspaceEdit()
+                for (const image of images) edit.createFile(image.uri, { contents: image.bytes })
                 let expected = text
                 for (const { from, to, text: value } of edits) {
                   expected = expected.slice(0, from) + value + expected.slice(to)

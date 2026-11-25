@@ -1,8 +1,14 @@
 import type { DrawingPatch, Scene } from './format.ts'
 
+export const importedImageTypes = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+} as const
+export const imageImportLimit = 8 * 1024 * 1024
+export type ImportedImage = { id: string; dataURL: string }
+
 export type Request =
   | { kind: 'ready' | 'reload' }
-  | { kind: 'patch'; id: number; version: number; patch: DrawingPatch }
+  | { kind: 'patch'; id: number; version: number; patch: DrawingPatch; images?: ImportedImage[] }
   | { kind: 'save' | 'markdown' | 'undo' | 'redo'; id: number }
   | { kind: 'link'; link: string }
 

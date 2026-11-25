@@ -173,11 +173,12 @@ export function readDrawing(source: string) {
 export type DrawingPatch = {
   elements: { id: string; fields: Partial<Element> }[]
   order?: string[]
+  attachments?: { id: string; target: string }[]
 }
 export type DrawingEdit = Span & { text: string }
 
 export function writeDrawing(source: string, patch: DrawingPatch): DrawingEdit[] {
-  if (!patch.elements.length && !patch.order) return []
+  if (!patch.elements.length && !patch.order && !patch.attachments?.length) return []
   const { stored, sections, payload, eol, drawingStart } = readDrawing(source)
   const elements = new Map(stored.elements.map(element => [element.id, element]))
   const edits: DrawingEdit[] = []
@@ -185,6 +186,7 @@ export function writeDrawing(source: string, patch: DrawingPatch): DrawingEdit[]
   let appendLinks = ''
   const textSection = sections['Text Elements']
   const linkSection = sections['Element Links']
+  const attachmentSection = sections['Embedded Files']
 
   for (const { id, fields } of patch.elements) {
     if (!elements.has(id) && (!isPortableElementId(id) || !fields.type)) {
@@ -224,7 +226,7 @@ export function writeDrawing(source: string, patch: DrawingPatch): DrawingEdit[]
   const comment = /(?:^|\n)%%[ \t]*\r?\n(?:[ \t]*\r?\n)*$/.exec(source.slice(0, drawingStart))
   const dataEnd = comment ? comment.index + (comment[0][0] === '\n' ? 1 : 0) : drawingStart
   const sectionStart = (section: Section) => source.lastIndexOf('\n', section.from - 2) + 1
-  const beforeAttachments = sections['Embedded Files'] ? sectionStart(sections['Embedded Files']) : dataEnd
+  const beforeAttachments = attachmentSection ? sectionStart(attachmentSection) : dataEnd
   const insertions = new Map<number, string>()
   if (appendText) {
     // Obsidian treats leading blank lines of the first label as part of its text.
@@ -236,6 +238,11 @@ export function writeDrawing(source: string, patch: DrawingPatch): DrawingEdit[]
   if (appendLinks) {
     const from = linkSection?.to ?? beforeAttachments
     insertions.set(from, (insertions.get(from) ?? '') + (linkSection ? appendLinks : `## Element Links${eol}${appendLinks}`))
+  }
+  if (patch.attachments?.length) {
+    const from = attachmentSection?.to ?? dataEnd
+    const records = patch.attachments.map(({ id, target }) => `${id}: [[${target}]]${eol}${eol}`).join('')
+    insertions.set(from, (insertions.get(from) ?? '') + (attachmentSection ? '' : `## Embedded Files${eol}`) + records)
   }
   for (const [from, text] of insertions) {
     const separator = from === textSection?.from || source.slice(0, from).endsWith(eol + eol) || text.startsWith('## ') ? '' : eol

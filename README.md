@@ -45,6 +45,7 @@
 
 ### 4. 库内图片与双链，如常工作
 * **本地图片直接显示**：自动解析图档关联的库内图片附件（支持 PNG、JPG、WebP、GIF、SVG），缺图时温和提示并保留文件里的原始引用不丢失。
+* **从文件或剪贴板插图**：进入 **编辑画板**，拖入 PNG、JPEG、WebP 或 GIF，或直接粘贴截图。每次最多 8 MiB；图片以独立附件保存在图档同目录，保存图档后 Obsidian 可打开同一个引用。撤销导入会一并撤销本次创建的附件，重做会恢复。
 * **图形链接一点即达**：点击画板元素绑定的 `[[双链]]` 可直接用 Vsidian 打开对应笔记，点击 `http(s)://` 外链可直接跳转到浏览器。
 
 ---
@@ -67,7 +68,7 @@
 
 * **工作区与路径解析**：若图档引用了以 Obsidian 库根目录为起点的附件或双链，请在 VS Code 中将 **Obsidian 库根目录** 作为工作区文件夹打开。
 * **当前支持的内容**：支持常见图形、文字与库内已有图片附件的渲染与编辑；Obsidian 端继续使用原社区插件 [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin)，无需额外配置。
-* **暂未覆盖的高级特性**：自定义脚本、网页 / 笔记 / PDF 等高级嵌入不在 Vsidian 画板中执行或渲染（但原始数据会原样保留不破坏）；首版暂不支持在画板内直接拖入或粘贴新图片，也不接管其他笔记里 `![[图]]` 的嵌入预览。
+* **暂未覆盖的高级特性**：自定义脚本、网页 / 笔记 / PDF 等高级嵌入不在 Vsidian 画板中执行或渲染（保留原始数据）；其他笔记里的 `![[图]]` 尚未接管。
 
 ---
 
@@ -107,6 +108,7 @@ node test/native.mjs <阶段> out/roundtrip <Vsidian源码目录> <Code.exe> <Vs
 ```
 
 * 依次运行 `seed`（Obsidian 生成 `json` 与 `compressed-json` 两种图档）、`vscode`（Vsidian 阅读、绘制、撤销、切换与保存）、`reopen`（Obsidian 重开校验），以及 `create`、`new`（Vsidian 新建图档、Obsidian 重开校验）。
+* 图片导入验收：同一测试目录依次跑 `seed`、`image-import`、`image-reopen`、`image-return`，覆盖粘贴、拖入、撤销与重做，以及两端保存后重开。
 * Obsidian 插件目录应包含官方发布的 `main.js`、`manifest.json` 和 `styles.css`。测试记录和截图保存在临时目录内，不读写日常使用的库。
 
 ### 发布到 VS Code Marketplace

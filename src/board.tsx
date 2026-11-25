@@ -1,9 +1,9 @@
-import { Excalidraw } from '@excalidraw/excalidraw'
-import type { AppState, ExcalidrawImperativeAPI, ExcalidrawInitialDataState } from '@excalidraw/excalidraw/types'
+import { CaptureUpdateAction, convertToExcalidrawElements, Excalidraw, viewportCoordsToSceneCoords } from '@excalidraw/excalidraw'
+import type { AppState, BinaryFileData, ExcalidrawImperativeAPI, ExcalidrawInitialDataState } from '@excalidraw/excalidraw/types'
 import '@excalidraw/excalidraw/index.css'
 import { createRoot } from 'react-dom/client'
 import type { Element, Scene } from './format.ts'
-import type { Message, Request, State } from './protocol.ts'
+import { imageImportLimit, importedImageTypes, type ImportedImage, type Message, type Request, type State } from './protocol.ts'
 import { createSceneDiff, isPortableText } from './scene.ts'
 import { strings } from './strings.ts'
 import './board.css'
@@ -33,10 +33,13 @@ let nextId = 0
 const waiting = new Map<number, (result: Extract<Message, { kind: 'result' }>) => void>()
 let initial: ExcalidrawInitialDataState
 let viewed = false
+let importFlight = Promise.resolve()
+let imageNotice: string | undefined
+const pendingImages = new Map<string, ImportedImage>()
 
 const capture = () => structuredClone(api!.getSceneElementsIncludingDeleted()) as unknown as Element[]
 
-function request(command: { kind: 'patch'; version: number; patch: ReturnType<typeof diff> }
+function request(command: { kind: 'patch'; version: number; patch: ReturnType<typeof diff>; images?: ImportedImage[] }
   | { kind: 'save' | 'markdown' | 'undo' | 'redo' }) {
   const id = ++nextId
   return new Promise<Extract<Message, { kind: 'result' }>>(resolve => {
@@ -71,12 +74,15 @@ function flush(): Promise<boolean> {
       const patch = diff(baseline, elements)
       if (!patch.elements.length && !patch.order) break
       if (!validateText(patch)) break
-      const result = await request({ kind: 'patch', version: revision, patch })
+      const fileIds = new Set(patch.elements.flatMap(({ fields }) => fields.fileId && !fields.isDeleted ? [fields.fileId] : []))
+      const images = [...pendingImages.values()].filter(image => fileIds.has(image.id))
+      const result = await request({ kind: 'patch', version: revision, patch, ...(images.length ? { images } : {}) })
       if (result.reason) {
         if (result.reason === 'disabled') return false
         if (result.reason !== 'inactive') issue = result.reason
         break
       }
+      for (const image of images) pendingImages.delete(image.id)
       baseline = elements
       revision = result.version
     }
@@ -99,6 +105,7 @@ function schedule(state?: AppState) {
 }
 
 async function finishOperation(kind: 'save' | 'markdown' | 'undo' | 'redo' | 'done') {
+  await importFlight
   if (kind === 'markdown' && (!enabled || issue)) {
     // Retain the canvas and its pending changes, and open the underlying file in the other tab.
     await request({ kind })
@@ -144,7 +151,61 @@ function install(scene: Scene) {
   api = undefined
   baseline = undefined
   diff = createSceneDiff(scene.elements.map(element => element.id))
+  pendingImages.clear()
+  imageNotice = undefined
   mount++
+}
+
+function importImages(files: File[], point: { clientX: number; clientY: number }) {
+  if (!enabled || !editing || !api || issue || api.getAppState().editingTextElement) return
+  if (files.some(file => !Object.hasOwn(importedImageTypes, file.type))
+    || files.reduce((bytes, file) => bytes + file.size, 0) > imageImportLimit) {
+    imageNotice = words.imageTypes
+    render()
+    return
+  }
+  const editor = api
+  const { x, y } = viewportCoordsToSceneCoords(point, editor.getAppState())
+  imageNotice = undefined
+  // Handle only raster images here. The SDK's file-drop path can replace the
+  // entire scene when a PNG carries Excalidraw export metadata.
+  importFlight = importFlight.then(async () => {
+    const bitmaps = await Promise.all(files.map(async (file, index) => {
+      const dataURL = await new Promise<BinaryFileData['dataURL']>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result as BinaryFileData['dataURL'])
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(file)
+      })
+      const image = new Image()
+      image.src = dataURL
+      await image.decode()
+      const id = crypto.randomUUID().replaceAll('-', '') as BinaryFileData['id']
+      const scale = Math.min(1, 480 / Math.max(image.naturalWidth, image.naturalHeight))
+      const data: BinaryFileData = { id, dataURL, mimeType: file.type as keyof typeof importedImageTypes, created: Date.now() }
+      return {
+        data,
+        shape: { type: 'image' as const, fileId: id, status: 'saved' as const,
+          x: x + index * 24, y: y + index * 24, width: image.naturalWidth * scale, height: image.naturalHeight * scale },
+      }
+    }))
+    if (!enabled || !editing || api !== editor || issue) return
+    const added = convertToExcalidrawElements(bitmaps.map(bitmap => bitmap.shape))
+    for (const { data } of bitmaps) pendingImages.set(data.id, data)
+    editor.addFiles(bitmaps.map(bitmap => bitmap.data))
+    editor.updateScene({
+      elements: [...editor.getSceneElementsIncludingDeleted(), ...added],
+      appState: { selectedElementIds: Object.fromEntries(added.map(element => [element.id, true])) },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    })
+    schedule()
+  }).catch(error => {
+    console.error(error)
+    if (api === editor) {
+      imageNotice = words.imageFailed
+      render()
+    }
+  })
 }
 
 function bind(next: ExcalidrawImperativeAPI) {
@@ -245,15 +306,32 @@ function render() {
       <span>{failed}</span>
       {enabled && issue && <button onClick={() => bridge.postMessage({ kind: 'reload' })}>{words.reload}</button>}
     </div>}
+    {usable && !failed && imageNotice && <div className="board-notice" role="status">{imageNotice}</div>}
     {usable && !failed && doc!.missing.length > 0 && <div className="board-notice" role="status">
       {words.missing} {doc!.missing.join(', ')}
     </div>}
-    <main className="board-canvas" onDropCapture={event => {
-      if (event.dataTransfer.files.length) {
+    <main className="board-canvas"
+      onDragOverCapture={event => {
+        if (event.dataTransfer.types.includes('Files')) {
+          event.preventDefault()
+          event.dataTransfer.dropEffect = editing && enabled ? 'copy' : 'none'
+        }
+      }}
+      onDropCapture={event => {
+        const files = Array.from(event.dataTransfer.files)
+        if (!files.length) return
         event.preventDefault()
         event.stopPropagation()
-      }
-    }}>
+        importImages(files, { clientX: event.clientX, clientY: event.clientY })
+      }}
+      onPasteCapture={event => {
+        const files = Array.from(event.clipboardData.files)
+        if (!files.length || api?.getAppState().editingTextElement) return
+        event.preventDefault()
+        event.stopPropagation()
+        const box = event.currentTarget.getBoundingClientRect()
+        importImages(files, { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 })
+      }}>
       {!doc && enabled !== false && <p role="status">{words.loading}</p>}
       {doc?.scene && <Excalidraw key={mount} initialData={initial} excalidrawAPI={bind}
         langCode={locale.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en'}

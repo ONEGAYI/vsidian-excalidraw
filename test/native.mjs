@@ -10,7 +10,7 @@ import { newDrawing, readDrawing } from '../src/format.ts'
 
 const [stage, sessionPath, vsidianSource, vscodeExe, vsidianExtension, obsidianExe, pluginSource, installedAddon] = process.argv.slice(2)
 if (!stage || !sessionPath || !vsidianSource || !vscodeExe || !vsidianExtension || !obsidianExe || !pluginSource) {
-  throw new Error('Usage: node test/native.mjs <seed|vscode|reopen|create|new> <session-dir> <Vsidian-source> <Code.exe> <Vsidian-extension> <Obsidian.exe> <Obsidian-plugin-dir> [addonDir]')
+  throw new Error('Usage: node test/native.mjs <seed|vscode|reopen|create|new|image-import|image-reopen|image-return> <session-dir> <Vsidian-source> <Code.exe> <Vsidian-extension> <Obsidian.exe> <Obsidian-plugin-dir> [addonDir]')
 }
 const { runTestHost, buildTestHostArgs } = await import(pathToFileURL(path.resolve(vsidianSource, 'test/integration/testHost.mjs')))
 const addon = installedAddon ?? fileURLToPath(new URL('..', import.meta.url))
@@ -180,8 +180,10 @@ if (stage === 'seed') {
       console.log('PASS: Obsidian generated', file, scene.payload.kind, expected)
     }
   })
-} else if (stage === 'vscode' || stage === 'create') {
-  if (stage === 'vscode') for (const file of cases) await cp(path.join(session, file + '.original'), path.join(vault, file))
+} else if (['vscode', 'create', 'image-import', 'image-return'].includes(stage)) {
+  if (stage === 'vscode' || stage === 'image-import') {
+    for (const file of cases) await cp(path.join(session, file + '.original'), path.join(vault, file))
+  }
   const scope = path.join(session, stage + '-user')
   await mkdir(path.join(scope, 'User'), { recursive: true })
   await writeFile(path.join(scope, 'User', 'settings.json'), JSON.stringify({
@@ -199,12 +201,16 @@ if (stage === 'seed') {
     page.on('pageerror', error => console.error('[workbench]', error.message))
     await vscodeFlow(page)
   }, { VSED_SESSION: session, VSED_RUN: runId, VSIDIAN_TEST_HOOKS: '1' })
-} else if (stage === 'reopen' || stage === 'new') {
+} else if (stage === 'reopen' || stage === 'new' || stage === 'image-reopen') {
   const selected = stage === 'new' ? ['Drawing.excalidraw.md'] : cases
-  for (const file of selected) await cp(path.join(session, file + '.from-vsidian'), path.join(vault, file))
+  for (const file of selected) {
+    const suffix = stage === 'image-reopen' ? '.with-import' : '.from-vsidian'
+    await cp(path.join(session, file + suffix), path.join(vault, file))
+  }
   await obsidian(async page => {
     for (const file of selected) {
       const expectedText = stage === 'new' ? 'Created in Vsidian · 双平台'
+        : stage === 'image-reopen' ? file === cases[0] ? linkedLabel : 'Original Label'
         : file === cases[0] ? editedLinkedLabel : 'Edited in Vsidian'
       await page.evaluate(file => {
         const plugin = app.plugins.plugins['obsidian-excalidraw-plugin']
@@ -241,14 +247,16 @@ if (stage === 'seed') {
         })), files: Object.keys(view.excalidrawAPI.getFiles()) }
       })
       assert.equal(snapshot.type, 'excalidraw')
-      if (stage === 'reopen') {
+      if (stage === 'reopen' || stage === 'image-reopen') {
         const saved = readDrawing(await readFile(path.join(vault, file), 'utf8'))
         assert.deepEqual(snapshot.elements.map(e => e.id).sort(), saved.scene.elements.filter(e => !e.isDeleted).map(e => e.id).sort())
         assert(snapshot.elements.some(e => e.type === 'text' && e.text === expectedText))
         assert.equal(snapshot.elements.length, 4)
-        const imageId = snapshot.elements.find(e => e.type === 'image').fileId
-        await page.waitForFunction(id => id in app.workspace.activeLeaf.view.excalidrawAPI.getFiles(), imageId, { polling: 100 })
-        await retry(() => page.evaluate(readPaint), 'Obsidian did not paint the chart and linked image after reopening')
+        const imageIds = snapshot.elements.filter(e => e.type === 'image').map(e => e.fileId)
+        assert.equal(imageIds.length, stage === 'image-reopen' ? 2 : 1)
+        await page.waitForFunction(ids => ids.every(id => id in app.workspace.activeLeaf.view.excalidrawAPI.getFiles()),
+          imageIds, { polling: 100 })
+        await retry(() => page.evaluate(readPaint, stage === 'image-reopen'), 'Obsidian did not paint the chart and linked images after reopening')
       } else {
         assert(snapshot.elements.some(e => e.type === 'text' && e.text === 'Created in Vsidian · 双平台'))
       }
@@ -272,6 +280,9 @@ if (stage === 'seed') {
         return saved.scene.elements.some(element => element.id === continued && element.type === 'ellipse') && saved
       }, 'Obsidian could not continue editing ' + file)
       assert(result.scene.elements.length >= snapshot.elements.length + 1)
+      if (stage === 'image-reopen') {
+        for (const { fileId } of snapshot.elements.filter(element => element.type === 'image')) assert(result.attachments.has(fileId))
+      }
       console.log('PASS: Obsidian continued editing and saved the same file', file)
     }
   })
@@ -315,6 +326,87 @@ async function vscodeFlow(page) {
 
   if (stage === 'create') {
     await createFlow(page, command, frameWith, hasView)
+    await command('stop')
+    return
+  }
+
+  if (stage === 'image-import' || stage === 'image-return') {
+    for (const [i, file] of cases.entries()) {
+      await command('board', file)
+      await hasView(boardView, file)
+      const frame = await frameWith('.board-toolbar')
+      const button = name => frame.locator('.board-toolbar').getByRole('button', { name, exact: true })
+      await retry(() => button('Edit drawing').isEnabled(), 'The image test board did not initialize')
+      if (stage === 'image-return') {
+        await retry(() => frame.evaluate(readPaint, true), 'Imported image did not paint after Obsidian saved the drawing')
+        assert(!(await command('snapshot', file)).dirty)
+        console.log('PASS: Vsidian paints both attachments after the Obsidian save', file)
+        continue
+      }
+      const method = i === 0 ? 'paste' : 'drop'
+      const before = readDrawing((await command('snapshot', file)).source)
+      await button('Edit drawing').click()
+      const area = await frame.locator('.excalidraw').boundingBox()
+      assert(area)
+      await page.mouse.click(area.x + 130, area.y + 220)
+      await frame.evaluate(async method => {
+        const swatch = document.createElement('canvas')
+        swatch.width = 64
+        swatch.height = 48
+        const context = swatch.getContext('2d')
+        context.fillStyle = '#19ba50'
+        context.fillRect(0, 0, 64, 48)
+        const image = await new Promise(resolve => swatch.toBlob(resolve, 'image/png'))
+        const transfer = new DataTransfer()
+        transfer.items.add(new File([image], 'capture.png', { type: 'image/png' }))
+        const canvas = document.querySelector('.excalidraw canvas.interactive') ?? document.querySelector('.excalidraw canvas')
+        const bounds = canvas.getBoundingClientRect()
+        if (method === 'paste') {
+          canvas.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer }))
+        } else {
+          canvas.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer,
+            clientX: bounds.left + 130, clientY: bounds.top + 220 }))
+        }
+      }, method)
+      const imported = await retry(async () => {
+        const doc = await command('snapshot', file)
+        const drawing = readDrawing(doc.source)
+        const element = drawing.scene.elements.find(el => el.type === 'image' && !el.isDeleted
+          && !before.scene.elements.some(original => original.id === el.id))
+        return doc.dirty && element && drawing.attachments.has(element.fileId) && { drawing, element }
+      }, 'Import by ' + method + ' did not write a referenced image into the open drawing', 5500)
+      const target = imported.drawing.attachments.get(imported.element.fileId)
+      assert.equal(imported.drawing.payload.kind, before.payload.kind)
+      assert(!imported.drawing.stored.files?.[imported.element.fileId], 'The attachment was duplicated inside the scene')
+      const png = await readFile(path.join(vault, target))
+      assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
+      await retry(() => frame.evaluate(readPaint, true), 'The imported image did not paint in VS Code')
+      await button('Undo').click()
+      await retry(async () => !readDrawing((await command('snapshot', file)).source).attachments.has(imported.element.fileId),
+        'Undo did not take out the newly inserted image reference')
+      await retry(async () => {
+        try { await readFile(path.join(vault, target)); return false }
+        catch (error) { if (error.code === 'ENOENT') return true; throw error }
+      }, 'Undo did not remove the single newly created attachment')
+      await button('Redo').click()
+      await retry(async () => readDrawing((await command('snapshot', file)).source).attachments.has(imported.element.fileId),
+        'Redo did not restore the newly inserted image reference')
+      assert((await readFile(path.join(vault, target))).equals(png), 'Redo did not restore the PNG contents')
+      await retry(() => button('Save').isEnabled(), 'The drawing did not become saveable after redo', 5000).catch(async error => {
+        console.error('After redoing the image import:', await frame.locator('.board-mode').innerText(),
+          await frame.locator('.board-notice').allTextContents())
+        await page.screenshot({ path: path.join(session, 'vscode-image-redo-failure.png') })
+        throw error
+      })
+      await button('Save').click()
+      const disk = await retry(async () => {
+        const source = await readFile(path.join(vault, file), 'utf8')
+        return readDrawing(source).attachments.has(imported.element.fileId) && source
+      }, 'Saving did not persist the imported image')
+      await writeFile(path.join(session, file + '.with-import'), disk)
+      await page.screenshot({ path: path.join(session, 'vscode-image-' + i + '.png') })
+      console.log('PASS: VS Code ' + method + ', image pixels, grouped undo/redo and save:', file, target)
+    }
     await command('stop')
     return
   }
@@ -439,23 +531,24 @@ async function readJson(file) {
     if (error.code !== 'ENOENT') throw error
   }
 }
-function readPaint() {
+function readPaint(requireGreen = false) {
   for (const canvas of document.querySelectorAll('.excalidraw canvas')) {
     if (canvas.width < 100 || canvas.height < 100) continue
     const ctx = canvas.getContext('2d')
     if (!ctx) continue
     const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
-    let left = canvas.width, right = 0, top = canvas.height, bottom = 0, blue = 0
+    let left = canvas.width, right = 0, top = canvas.height, bottom = 0, blue = 0, green = 0
     for (let p = 0; p < data.length; p += 4) {
       const r = data[p], g = data[p + 1], b = data[p + 2], a = data[p + 3]
       if (a > 180 && b > 155 && r < 60 && g > 60 && g < 125) blue++
+      if (a > 180 && g > 150 && r < 60 && b > 45 && b < 120) green++
       if (a > 180 && r > 160 && g < 80 && b < 80) {
         const x = (p / 4) % canvas.width, y = Math.floor((p / 4) / canvas.width)
         left = Math.min(left, x); right = Math.max(right, x)
         top = Math.min(top, y); bottom = Math.max(bottom, y)
       }
     }
-    if (right > left && blue > 50) return { left, right, top, bottom, blue, width: canvas.width, height: canvas.height }
+    if (right > left && blue > 50 && (!requireGreen || green > 50)) return { left, right, top, bottom, blue, green, width: canvas.width, height: canvas.height }
   }
 }
 async function createFlow(page, command, frameWith, hasView) {
