@@ -30,4 +30,5 @@ export type State = {
 }
 export type Message = State
   | { kind: 'status'; dirty: boolean }
+  | { kind: 'web-policy'; origins: string[] }
   | { kind: 'result'; id: number; version: number; reason?: 'conflict' | 'deleted' | 'disabled' | 'reservedText' | 'inactive' }

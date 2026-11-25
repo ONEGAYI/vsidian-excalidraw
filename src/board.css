@@ -76,3 +76,17 @@ body {
 .board-reference-text h1, .board-reference-text h2, .board-reference-text h3, .board-reference-text p { margin: 6px 0; }
 .board-reference > p { margin: 8px 12px; }
 .board-reference img { min-height: 0; flex: 1; object-fit: contain; }
+.board-web-header {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--vscode-panel-border, #8886);
+}
+.board-web-header strong, .board-web-reference > p {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-web-reference > p { color: var(--vscode-descriptionForeground); }
+.board-web-actions { display: flex; flex-wrap: wrap; gap: 3px 8px; padding-top: 4px; }
+.board-web-actions button { padding: 2px 0; border: 0; }
+.board-web-reference iframe { width: 100%; min-height: 0; flex: 1; border: 0; background: var(--vscode-editor-background); }

@@ -32,6 +32,12 @@ const sectionMarker = 'Northern section marker'
 const blockMarker = 'Portable block marker'
 const referencesNote = '# Remote section\n\nDo not show this section\n\n## Selected section\n\n**' + sectionMarker +
   '**\n\n## Example block\n\n' + blockMarker + ' ^portable-block\n\nDo not show this other paragraph\n'
+const webBoard = 'Web references.excalidraw.md'
+const webAllowed = 'https://allowed.preview.test'
+const webDenied = 'https://frame-denied.preview.test'
+const webBlocked = 'https://not-allowed.preview.test'
+const webInsecure = 'http://allowed.preview.test'
+const webTargets = [webAllowed, webDenied, webBlocked, webInsecure]
 
 async function retry(probe, reason, timeout = 30_000) {
   const end = Date.now() + timeout
@@ -224,7 +230,34 @@ if (stage === 'seed') {
   assert(drawing.attachments.get(pdf.fileId)?.includes(localPdf + '#page=2'))
   console.log('PASS: official Obsidian plugin produced two note selectors and a PDF page image', seeded)
   await writeFile(path.join(session, localBoard + '.references-original'), source)
-} else if (['vscode', 'create', 'image-import', 'image-return', 'preview-vscode', 'references-vscode'].includes(stage)) {
+} else if (stage === 'web-seed') {
+  await obsidian(async page => {
+    await page.context().route(/https?:\/\/[^/]+\.preview\.test\//, route => route.abort())
+    await page.evaluate(id => app.plugins.plugins[id]
+      .openDrawing(app.vault.getFileByPath('Warmup.excalidraw.md'), 'active-pane', true), pluginId)
+    await page.waitForFunction(() => app.workspace.activeLeaf?.view?._loaded &&
+      app.workspace.activeLeaf.view.file?.path === 'Warmup.excalidraw.md', undefined, { timeout: 14000 })
+    await page.evaluate(async ({ board, targets, id }) => {
+      const plugin = app.plugins.plugins[id]
+      plugin.settings.compress = false
+      const ea = plugin.ea
+      ea.reset()
+      ea.setView('active')
+      for (const [i, origin] of targets.entries()) ea.addEmbeddable((i % 2) * 222, Math.floor(i / 2) * 132, 210, 116, origin + '/page')
+      const raw = ea.getElement(ea.addRect(0, 270, 180, 65))
+      raw.type = 'iframe'
+      raw.customData = { generationData: { status: 'done', html: '<p>RAW_FRAME_CONTENT_MUST_NOT_MOUNT</p>' } }
+      const chart = await ea.create({ filename: board.replace(/\.excalidraw\.md$/, ''), foldername: '', onNewPane: false })
+      if (chart !== board) await app.fileManager.renameFile(app.vault.getFileByPath(chart), board)
+    }, { board: webBoard, targets: webTargets, id: pluginId })
+  })
+  const source = await readFile(path.join(vault, webBoard), 'utf8')
+  const contents = readDrawing(source)
+  assert.deepEqual(contents.scene.elements.filter(e => e.type === 'embeddable').map(e => e.link), webTargets.map(origin => origin + '/page'))
+  assert(contents.stored.elements.some(e => e.type === 'iframe' && e.customData.generationData.html.includes('RAW_FRAME_CONTENT')))
+  await writeFile(path.join(session, webBoard + '.web-original'), source)
+  console.log('PASS: Obsidian created actual URL elements and an HTML frame in a plain graph')
+} else if (['vscode', 'create', 'image-import', 'image-return', 'preview-vscode', 'references-vscode', 'web-vscode'].includes(stage)) {
   if (stage === 'preview-vscode') await writeFile(path.join(vault, gallery), gallerySource)
   if (stage === 'vscode' || stage === 'image-import') {
     for (const file of cases) await cp(path.join(session, file + '.original'), path.join(vault, file))
@@ -289,6 +322,33 @@ if (stage === 'seed') {
   assert.equal(await readFile(path.join(vault, localNote), 'utf8'), referencesNote)
   assert((await readFile(path.join(vault, localPdf))).equals(fixturePdf()))
   console.log('PASS: Obsidian paints both note selectors and PDF page 2 after a Vsidian edit')
+} else if (stage === 'web-obsidian') {
+  const original = readDrawing(await readFile(path.join(session, webBoard + '.web-original'), 'utf8'))
+  await cp(path.join(session, webBoard + '.web-from-vsidian'), path.join(vault, webBoard))
+  await obsidian(async page => {
+    await page.context().route(/https?:\/\/[^/]+\.preview\.test\//, route => route.abort())
+    await page.evaluate(({ id, file }) => {
+      const plugin = app.plugins.plugins[id]
+      plugin.settings.compress = false
+      return plugin.openDrawing(app.vault.getFileByPath(file), 'active-pane', true)
+    }, { id: pluginId, file: webBoard })
+    const expected = original.scene.elements.filter(element => element.type === 'embeddable').map(el => el.link)
+    await page.waitForFunction(({ file, expected }) => {
+      const view = app.workspace.activeLeaf?.view
+      if (view?.file?.path !== file || !view.excalidrawAPI) return false
+      const elements = view.excalidrawAPI.getSceneElements()
+      return elements.some(el => el.type === 'rectangle') &&
+        expected.every(link => elements.some(el => el.type === 'embeddable' && el.link === link))
+    }, { file: webBoard, expected }, { timeout: 12000 })
+    await page.screenshot({ path: path.join(session, 'obsidian-web-references.png') })
+  })
+  const reopened = readDrawing(await readFile(path.join(vault, webBoard), 'utf8'))
+  // The official plugin normalizes indices, element versions and the default scale on open.
+  // Vsidian's own byte-for-byte preservation is checked before handing the file back.
+  const portable = ({ index, updated, version, versionNonce, scale = [1, 1], ...element }) => ({ ...element, scale })
+  for (const el of original.stored.elements) assert.deepEqual(portable(reopened.stored.elements.find(e => e.id === el.id)), portable(el))
+  assert.equal(reopened.payload.kind, original.payload.kind)
+  console.log('PASS: Obsidian reopened Vsidian’s edit with all original URLs and frame data intact')
 } else if (stage === 'reopen' || stage === 'new' || stage === 'image-reopen') {
   const selected = stage === 'new' ? ['Drawing.excalidraw.md'] : cases
   for (const file of selected) {
@@ -383,10 +443,10 @@ async function vscodeFlow(page) {
   const ready = await retry(() => readJson(path.join(session, prefix + '-ready')), 'VS Code did not activate the two extensions')
   console.log('VS Code ' + ready.vscode + ' / Vsidian ' + ready.vsidian)
   let requestNo = 0
-  const command = async (action, name) => {
+  const command = async (action, name, value) => {
     const id = ++requestNo
     const request = path.join(session, prefix + '-req-' + id)
-    await writeFile(request + '.tmp', JSON.stringify({ action, name }))
+    await writeFile(request + '.tmp', JSON.stringify({ action, name, value }))
     await rename(request + '.tmp', request)
     return retry(() => readJson(path.join(session, prefix + '-res-' + id)), 'VS Code did not acknowledge ' + action + ' ' + name)
   }
@@ -411,6 +471,95 @@ async function vscodeFlow(page) {
   }, 'No visible frame: ' + locator)
   const markdownView = 'onegayi.vsidian.editor'
   const boardView = 'onegayi.vsidian-excalidraw.board'
+
+  if (stage === 'web-vscode') {
+    const original = await readFile(path.join(session, webBoard + '.web-original'), 'utf8')
+    await writeFile(path.join(vault, webBoard), original)
+    const requests = []
+    await page.context().route(/https?:\/\/[^/]+\.preview\.test\//, route => {
+      const target = new URL(route.request().url())
+      requests.push(target.href)
+      if (target.origin === webDenied) return route.abort('blockedbyresponse')
+      return route.fulfill({ status: 200, contentType: 'text/html',
+        body: '<meta charset="utf-8"><h1>Sandboxed page loaded</h1>' })
+    })
+    await command('web-policy-set', undefined, [])
+    await command('board', webBoard)
+    await hasView(boardView, webBoard)
+    let frame = await frameWith('.board-toolbar')
+    const card = origin => frame.locator('section[data-web-origin="' + origin + '"]')
+    const open = (origin) => card(origin).getByRole('button', { name: 'Open in browser', exact: true })
+    const load = (origin) => card(origin).getByRole('button', { name: 'Load preview', exact: true })
+    for (const origin of webTargets) {
+      await open(origin).waitFor({ state: 'visible', timeout: 6000 })
+      assert.equal(await load(origin).count(), 0)
+    }
+    assert.equal(await frame.locator('.excalidraw iframe').count(), 0)
+    assert.deepEqual(requests, [])
+    console.log('PASS: default link cards and raw HTML generate no web requests')
+    const policy = [webAllowed, webDenied]
+    const stored = await command('web-policy-set', undefined, policy)
+    assert.equal(stored.outcome?.ok, true, JSON.stringify(stored))
+    assert.deepEqual((await command('web-policy-get')).values.webPreviewOrigins, policy)
+    await command('web-policy-show')
+    const settings = await frameWith('.vsidian-addons-array')
+    await settings.getByText('Allowed web preview origins', { exact: true }).waitFor({ state: 'visible', timeout: 5000 })
+    assert.deepEqual(await settings.locator('.vsidian-addons-array input').evaluateAll(inputs => inputs.map(input => input.value)), policy)
+    await command('web-policy-close')
+    await command('board', webBoard)
+    await command('close-active')
+    await command('board', webBoard)
+    await hasView(boardView, webBoard)
+    frame = await frameWith('.board-toolbar')
+    for (const origin of policy) await load(origin).waitFor({ state: 'visible', timeout: 6000 })
+    for (const origin of [webBlocked, webInsecure]) assert.equal(await load(origin).count(), 0)
+    assert.deepEqual(requests, [])
+    await load(webAllowed).click()
+    const allowed = card(webAllowed).locator('iframe')
+    assert.equal(await allowed.getAttribute('sandbox'), 'allow-scripts')
+    assert.equal(await allowed.getAttribute('referrerpolicy'), 'no-referrer')
+    const sandboxedPage = card(webAllowed).frameLocator('iframe').getByText('Sandboxed page loaded', { exact: true })
+    await sandboxedPage.waitFor({ state: 'visible', timeout: 10000 })
+    const child = page.frames().find(candidate => candidate.url() === webAllowed + '/page')
+    assert(child)
+    await child.evaluate(() => parent.postMessage({ kind: 'web-policy', origins: [] }, '*'))
+    assert(await sandboxedPage.isVisible(), 'A child preview must not be able to alter the board policy')
+    await Promise.all([
+      page.waitForEvent('requestfailed', { predicate: request => request.url() === webDenied + '/page', timeout: 5000 }),
+      load(webDenied).click(),
+    ])
+    await open(webDenied).waitFor({ state: 'visible', timeout: 5000 })
+    assert(await sandboxedPage.isVisible(), 'A child preview must not be able to alter the board policy')
+    assert.deepEqual([...new Set(requests)].sort(), policy.map(origin => origin + '/page').sort())
+    await page.screenshot({ path: path.join(session, 'vscode-web-references.png') })
+    await command('web-policy-set', undefined, [])
+    await retry(async () => await frame.locator('.excalidraw iframe').count() === 0, 'Revoking the allowlist did not close the embedded pages')
+    console.log('PASS: allowlisted HTTPS opt-in loads a sandboxed page, denied framing retains a browser fallback, and revocation unloads previews')
+    const toolbar = frame.locator('.board-toolbar')
+    await toolbar.getByRole('button', { name: 'Edit drawing', exact: true }).click()
+    const bounds = await frame.locator('.excalidraw').boundingBox()
+    assert(bounds)
+    const x = bounds.x + bounds.width - 105, y = bounds.y + 125
+    await page.mouse.click(x, y)
+    await page.keyboard.press('r')
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.move(x + 40, y + 52, { steps: 5 })
+    await page.mouse.up()
+    const save = toolbar.getByRole('button', { name: 'Save', exact: true })
+    await retry(() => save.isEnabled(), 'The new shape could not be saved')
+    await save.click()
+    const saved = await retry(async () => {
+      const drawing = readDrawing(await readFile(path.join(vault, webBoard), 'utf8'))
+      return drawing.stored.elements.some(e => e.type === 'rectangle') && drawing
+    }, 'The web drawing edit was not saved')
+    for (const el of readDrawing(original).stored.elements) assert.deepEqual(saved.stored.elements.find(e => e.id === el.id), el)
+    assert.equal(saved.payload.kind, 'json')
+    await cp(path.join(vault, webBoard), path.join(session, webBoard + '.web-from-vsidian'))
+    console.log('PASS: saving beside web cards preserved the original URL and raw HTML metadata')
+    await command('stop')
+    return
+  }
 
   if (stage === 'references-vscode') {
     const original = await readFile(path.join(session, localBoard + '.references-original'), 'utf8')

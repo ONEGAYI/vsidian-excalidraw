@@ -16,6 +16,9 @@ const en = {
   working: 'Updating the document…',
   openPreview: 'Open drawing: ', previewUnavailable: 'Drawing preview unavailable.',
   openSource: 'Open source: ', referenceUnavailable: 'Source preview unavailable.',
+  openWebsite: 'Open in browser', loadWebPreview: 'Load preview', hideWebPreview: 'Hide preview',
+  webOriginsTitle: 'Allowed web preview origins',
+  webOriginsDescription: 'Enter exact HTTPS origins, for example https://example.org. Reopen the board after adding an origin. Removing an origin closes its previews immediately.',
   emptyPreview: 'Empty drawing.',
 }
 export function strings(locale: string): typeof en {
@@ -37,6 +40,9 @@ export function strings(locale: string): typeof en {
     working: '正在更新文档…',
     openPreview: '打开画板：', previewUnavailable: '无法显示图档预览。',
     openSource: '打开原文件：', referenceUnavailable: '无法预览此引用。',
+    openWebsite: '在浏览器中打开', loadWebPreview: '加载预览', hideWebPreview: '收起预览',
+    webOriginsTitle: '允许预览的网页来源',
+    webOriginsDescription: '填写完整的 HTTPS 来源，例如 https://example.org。添加后请重开画板；移除后会立即关闭对应的预览。',
     emptyPreview: '画板为空。',
   } : en
 }

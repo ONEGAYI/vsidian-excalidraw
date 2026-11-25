@@ -1,12 +1,14 @@
 import { CaptureUpdateAction, convertToExcalidrawElements, Excalidraw, viewportCoordsToSceneCoords } from '@excalidraw/excalidraw'
 import type { AppState, BinaryFileData, ExcalidrawImperativeAPI, ExcalidrawInitialDataState } from '@excalidraw/excalidraw/types'
 import '@excalidraw/excalidraw/index.css'
+import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Element, Scene } from './format.ts'
 import { imageImportLimit, importedImageTypes, type ImportedImage, type Message, type Request, type State } from './protocol.ts'
-import { createSceneDiff, isPortableText } from './scene.ts'
+import { createSceneDiff, displayElements, isPortableText } from './scene.ts'
 import { strings } from './strings.ts'
 import { renderReferenceImages } from './reference-art.ts'
+import { webLink } from './web.ts'
 import './board.css'
 
 declare global {
@@ -39,6 +41,7 @@ let imageNotice: string | undefined
 const pendingImages = new Map<string, ImportedImage>()
 let incomingState = 0
 let pdfCards: Awaited<ReturnType<typeof renderReferenceImages>>['files'] = {}
+let permittedWebOrigins = new Set<string>()
 
 const capture = () => structuredClone(api!.getSceneElementsIncludingDeleted()) as unknown as Element[]
 
@@ -142,7 +145,7 @@ function install(scene: Scene) {
   const old = api?.getAppState()
   const persisted = scene.appState ?? {}
   initial = {
-    elements: scene.elements as unknown as ExcalidrawInitialDataState['elements'],
+    elements: displayElements(scene.elements) as unknown as ExcalidrawInitialDataState['elements'],
     files: scene.files as ExcalidrawInitialDataState['files'],
     appState: {
       ...(typeof persisted.viewBackgroundColor === 'string' ? { viewBackgroundColor: persisted.viewBackgroundColor } : {}),
@@ -231,7 +234,9 @@ function applyState(data: State, cards: typeof pdfCards = {}) {
   }
 }
 
-window.addEventListener('message', ({ data }: MessageEvent<Message>) => {
+window.addEventListener('message', ({ data, origin }: MessageEvent<Message>) => {
+  // VS Code's outer webview relays on this origin. A sandboxed child has an opaque origin.
+  if (origin !== window.origin || origin === 'null' || !data) return
   switch (data.kind) {
     case 'result': {
       const resolve = waiting.get(data.id)
@@ -241,6 +246,9 @@ window.addEventListener('message', ({ data }: MessageEvent<Message>) => {
     }
     case 'status':
       dirty = data.dirty
+      break
+    case 'web-policy':
+      permittedWebOrigins = new Set(data.origins)
       break
     case 'state': {
       if (data.enabled && !data.force && data.version < revision) return
@@ -300,6 +308,25 @@ const onChange = (_elements: readonly unknown[], state: AppState) => {
     return
   }
   schedule(state)
+}
+
+function WebCard({ url, canPreview, interactive }: { url: URL; canPreview: boolean; interactive: boolean }) {
+  const [opened, setOpened] = useState(false)
+  return <section className="board-reference board-web-reference" data-web-origin={url.origin}>
+    <header className="board-web-header">
+      <strong>{url.host}</strong>
+      <div className="board-web-actions" onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
+        <button type="button" disabled={!interactive}
+          onClick={() => bridge.postMessage({ kind: 'link', link: url.href })}>{words.openWebsite}</button>
+        {canPreview && <button type="button" disabled={!interactive}
+          onClick={() => setOpened(!opened)}>{opened ? words.hideWebPreview : words.loadWebPreview}</button>}
+      </div>
+    </header>
+    {canPreview && opened
+      ? <iframe title={url.host} src={url.href} sandbox="allow-scripts" referrerPolicy="no-referrer"
+          style={{ pointerEvents: interactive ? 'auto' : 'none' }} />
+      : <p>{url.pathname}{url.search}{url.hash}</p>}
+  </section>
 }
 
 function render() {
@@ -367,11 +394,16 @@ function render() {
         }}
         onPaste={(data, event) => !event?.clipboardData?.files.length
           && !data.elements?.some(element => element.type === 'image')}
-        validateEmbeddable={link => doc?.scene?.elements.some(element => element.link === link
-          && Object.hasOwn(doc?.references?.cards ?? {}, element.id)) ?? false}
+        validateEmbeddable={link => !!webLink(link) || (doc?.scene?.elements.some(element => element.link === link
+          && Object.hasOwn(doc?.references?.cards ?? {}, element.id)) ?? false)}
         renderEmbeddable={element => {
-          const reference = doc?.references?.cards[element.id]
           const link = element.link ?? ''
+          const url = webLink(link)
+          if (url) {
+            const canPreview = !!enabled && permittedWebOrigins.has(url.origin)
+            return <WebCard key={url.href + ':' + canPreview} url={url} canPreview={canPreview} interactive={!!enabled && !editing} />
+          }
+          const reference = doc?.references?.cards[element.id]
           const label = link.slice(2, -2).split('|', 1)[0]
           return <section className="board-reference">
             <button type="button" aria-label={words.openSource + label} disabled={!enabled || editing}

@@ -4,9 +4,10 @@ import type { BinaryFiles } from '@excalidraw/excalidraw/types'
 import type { Scene } from './format.ts'
 import type { LocalContent } from './references.ts'
 import { renderReferenceImages } from './reference-art.ts'
+import { displayElements } from './scene.ts'
 
 export async function renderThumbnail(scene: Scene, references: Record<string, LocalContent>, assetRoot: string) {
-  const elements = scene.elements.filter(element => !element.isDeleted)
+  const elements = displayElements(scene.elements.filter(element => !element.isDeleted))
   if (elements.length === 0) return null
   const { files } = await renderReferenceImages(references, assetRoot)
   const canvas = await exportToCanvas({

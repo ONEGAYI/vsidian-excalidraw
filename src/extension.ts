@@ -9,6 +9,7 @@ import { isDrawing, newDrawing, readDrawing, writeDrawing } from './format.ts'
 import { localReference } from './references.ts'
 import type { Message, Request } from './protocol.ts'
 import { strings } from './strings.ts'
+import { allowedWebOrigins, webLink } from './web.ts'
 
 const BOARD = 'onegayi.vsidian-excalidraw.board'
 const MARKDOWN = 'onegayi.vsidian.editor'
@@ -16,6 +17,11 @@ const HOST = 'onegayi.vsidian'
 
 type Vsidian = {
   registerAddon(owner: { id: string }, definition: {
+    setup(ctx: { settings: {
+      registerDefinitions(definitions: readonly unknown[]): Disposable
+      get(): { values: Readonly<Record<string, unknown>> }
+      onChanged(callback: () => void): Disposable
+    } }): void
     enable(ctx: {
       pages: { registerEditor(entry: { entry: string; resources: string[] }): Disposable }
       channel: { handle(topic: string, handler: (payload: unknown) => unknown): Disposable }
@@ -30,7 +36,9 @@ export async function activate(context: ExtensionContext) {
   if (!host) throw new Error('Vsidian is not available in this extension host')
   const api = await host.activate()
   let enabled = false
+  let webOrigins: string[] = []
   const boards = new Set<() => void>()
+  const webPolicies = new Set<() => void>()
   const output = window.createOutputChannel('Vsidian Excalidraw')
   const report = (error: unknown) => output.appendLine(error instanceof Error ? error.stack ?? error.message : String(error))
 
@@ -51,10 +59,11 @@ export async function activate(context: ExtensionContext) {
     const uri = (file: string) => panel.webview.asWebviewUri(Uri.joinPath(root, file)).toString()
     const nonce = randomUUID()
     const origin = panel.webview.cspSource
+    const frameSources = new Set(webOrigins)
     panel.webview.html = `<!doctype html>
 <html lang="${env.language.startsWith('zh') ? 'zh-CN' : 'en'}"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${origin}; style-src ${origin} 'unsafe-inline'; font-src ${origin} data:; img-src ${origin} data: blob:; connect-src ${origin} data: blob:; worker-src ${origin} blob:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${origin} 'wasm-unsafe-eval'; style-src ${origin} 'unsafe-inline'; font-src ${origin} data:; img-src ${origin} data: blob:; connect-src ${origin} data: blob:; worker-src ${origin} blob:; frame-src ${[...frameSources].join(' ') || "'none'"};">
 <link rel="stylesheet" href="${uri('board.css')}">
 <script nonce="${nonce}">window.EXCALIDRAW_ASSET_PATH=${JSON.stringify(uri(''))};window.boardLocale=${JSON.stringify(env.language)};</script>
 </head><body><div id="root"></div><script nonce="${nonce}" type="module" src="${uri('board.js')}"></script></body></html>`
@@ -83,12 +92,17 @@ export async function activate(context: ExtensionContext) {
       if (!disposed && document.version === version && enabled === state.enabled) await post({ ...state, dirty: document.isDirty })
     }
     const refresh = () => { void publish() }
+    const sendPolicy = () => ready && !disposed
+      ? post({ kind: 'web-policy', origins: webOrigins.filter(origin => frameSources.has(origin)) }) : undefined
+    const refreshPolicy = () => { void sendPolicy() }
     boards.add(refresh)
+    webPolicies.add(refreshPolicy)
 
     const accept = async (msg: Request) => {
       switch (msg.kind) {
         case 'ready':
           ready = true
+          await sendPolicy()
           await publish(true)
           return
         case 'reload': {
@@ -101,8 +115,9 @@ export async function activate(context: ExtensionContext) {
           break
         case 'link': {
           if (!enabled) return
-          if (/^https?:\/\//i.test(msg.link)) {
-            await env.openExternal(Uri.parse(msg.link, true))
+          const url = webLink(msg.link)
+          if (url) {
+            await env.openExternal(Uri.parse(url.href, true))
           } else {
             const target = localReference(msg.link, true)
             if (target) {
@@ -189,11 +204,25 @@ export async function activate(context: ExtensionContext) {
     panel.onDidDispose(() => {
       disposed = true
       boards.delete(refresh)
+      webPolicies.delete(refreshPolicy)
       for (const sub of subscriptions) sub.dispose()
     })
   }
 
   const addon = api.registerAddon(context.extension, {
+    setup({ settings }) {
+      settings.registerDefinitions([{
+        key: 'webPreviewOrigins', type: 'array', default: [], maxItems: 20,
+        items: { kind: 'string', maxLength: 260 },
+        title: words.webOriginsTitle, description: words.webOriginsDescription,
+      }])
+      const refresh = () => {
+        webOrigins = allowedWebOrigins(settings.get().values.webPreviewOrigins)
+        for (const notify of webPolicies) notify()
+      }
+      refresh()
+      settings.onChanged(refresh)
+    },
     enable({ pages, channel, onDispose }) {
       pages.registerEditor({ entry: 'dist/preview.js', resources: ['dist/board'] })
       for (const topic of ['drawing.preview', 'drawing.open']) {
