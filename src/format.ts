@@ -28,7 +28,35 @@ type Section = Span & { records: Map<string, RecordSpan> }
 type DataSections = Partial<Record<'Text Elements' | 'Element Links' | 'Embedded Files', Section>>
 
 const FRONTMATTER = /^(?:\uFEFF)?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
-const DRAWINGS = /^#{1,2} Drawing[ \t]*\r?\n```(json|compressed-json)[ \t]*\r?\n([\s\S]*?)^```[ \t]*\r?$/dgm
+const DRAWING = /^#{1,2} Drawing[ \t]*\r?\n```(json|compressed-json)[ \t]*\r?\n([\s\S]*?)^```[ \t]*\r?$/dmy
+
+function unfencedHeadings(source: string, start: number) {
+  const headings = new Map<number, string>()
+  const lines = /^[^\r\n]+/gm
+  lines.lastIndex = start
+  let fence = ''
+  let textSection = false
+  for (const { 0: line, index } of source.matchAll(lines)) {
+    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    // Excalidraw labels are raw text records; their block ID ends even a literal fence.
+    const recordEnd = textSection && /(?:[ \t]|^)\^[\w!-]{8}[ \t]*$/.test(line)
+    if (fence) {
+      if (recordEnd || (delimiter && delimiter[1][0] === fence[0] && delimiter[1].length >= fence.length && /^[ \t]*$/.test(delimiter[2]))) {
+        fence = ''
+      }
+    } else if (delimiter) {
+      if (!recordEnd && (delimiter[1][0] === '~' || !delimiter[2].includes('`'))) fence = delimiter[1]
+    } else {
+      const heading = /^(?:# (Excalidraw Data)|#{1,2} (Drawing|Text Elements|Element Links|Embedded [Ff]iles))[ \t]*$/.exec(line)
+      if (heading) {
+        const name = heading[1] ?? heading[2]
+        headings.set(index, name)
+        textSection = name === 'Text Elements'
+      }
+    }
+  }
+  return headings
+}
 
 export function isDrawing(source: string): boolean {
   const yaml = FRONTMATTER.exec(source)?.[1]
@@ -64,12 +92,10 @@ function keyedRecords(source: string, { from, to }: Span): Map<string, RecordSpa
   return records
 }
 
-function readSections(source: string, end: number, elements: Element[]): DataSections {
-  const prefix = source.slice(0, end)
-  const header = [...prefix.matchAll(/^# Excalidraw Data[ \t]*\r?$/gm)].at(-1)
-  const start = header?.index ?? FRONTMATTER.exec(prefix)?.[0].length ?? 0
-  const body = prefix.slice(start)
+function readSections(source: string, start: number, end: number, elements: Element[], unfenced: Map<number, string>): DataSections {
+  const body = source.slice(start, end)
   const headings = [...body.matchAll(/^#{1,2} (Text Elements|Element Links|Embedded [Ff]iles)[ \t]*\r?\n/gm)]
+    .filter(heading => unfenced.has(start + heading.index))
   const sections: DataSections = {}
   for (const [index, heading] of headings.entries()) {
     const key = heading[1] === 'Embedded files' ? 'Embedded Files' : heading[1] as keyof DataSections
@@ -93,9 +119,16 @@ function readSections(source: string, end: number, elements: Element[]): DataSec
 
 export function readDrawing(source: string) {
   if (!isDrawing(source)) throw new Error('not-drawing')
-  const candidates = [...source.matchAll(DRAWINGS)]
-  const header = candidates.length > 1 ? [...source.matchAll(/^# Excalidraw Data[ \t]*\r?$/gm)].at(-1)?.index : undefined
-  const blocks = header === undefined ? candidates : candidates.filter(candidate => candidate.index > header)
+  const bodyStart = FRONTMATTER.exec(source)![0].length
+  const headings = unfencedHeadings(source, bodyStart)
+  const drawing = new RegExp(DRAWING)
+  const blocks = []
+  for (const [index, heading] of headings) {
+    if (heading !== 'Drawing') continue
+    drawing.lastIndex = index
+    const block = drawing.exec(source)
+    if (block) blocks.push(block)
+  }
   if (blocks.length !== 1) throw new Error('drawing-section')
   const block = blocks[0]
   const kind = block[1] as 'json' | 'compressed-json'
@@ -104,7 +137,8 @@ export function readDrawing(source: string) {
   if (!stored || stored.type !== 'excalidraw' || typeof stored.version !== 'number' || !Array.isArray(stored.elements)) {
     throw new Error('invalid-scene')
   }
-  const sections = readSections(source, block.index, stored.elements)
+  const header = [...headings].filter(([index, heading]) => index < block.index && heading === 'Excalidraw Data').at(-1)?.[0]
+  const sections = readSections(source, header ?? bodyStart, block.index, stored.elements, headings)
   const elements = stored.elements.map(element => {
     if (!element || typeof element.id !== 'string' || typeof element.type !== 'string') throw new Error('invalid-element')
     const text = sections['Text Elements']?.records.get(element.id)?.value

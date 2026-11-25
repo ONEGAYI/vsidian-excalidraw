@@ -136,6 +136,54 @@ test('笔记后记里的 Excalidraw Data 示例不影响前面的真实画板', 
   assert.equal(readDrawing(saved).scene.elements[1].x, 45)
 })
 
+test('忽略 Markdown 围栏内的完整 Drawing，保存只改真实图档', async () => {
+  const { readDrawing, writeDrawing } = await import('../src/format.ts')
+  const sample = {
+    ...scene, elements: [{ id: 'sample01', type: 'rectangle', x: 50 }],
+  }
+  for (const kind of ['json', 'compressed-json']) {
+    const body = kind === 'json' ? JSON.stringify(sample) : compressed(sample)
+    const example = '# Excalidraw Data\r\n\r\n## Text Elements\r\nSample ^sample02\r\n\r\n%%\r\n'
+      + '## Drawing\r\n```' + kind + '\r\n' + body + '\r\n```\r\n%%\r\n'
+    const original = fixture(kind)
+    const document = prefix + '格式说明\r\n\r\n````markdown\r\n' + example + '````\r\n' + original.slice(prefix.length)
+    const notes = '\r\n后记\r\n\r\n  ~~~~markdown\r\n' + example + '  ~~~~\r\n'
+    const source = document + notes
+    const drawing = readDrawing(source)
+    assert.equal(drawing.payload.kind, kind)
+    assert.deepEqual(drawing.scene.elements.map(e => e.id), scene.elements.map(e => e.id))
+    const edits = writeDrawing(source, { elements: [{ id: 'shape001', fields: { x: 45 } }] })
+    assert.equal(edits.length, 1)
+    const [edit] = edits
+    assert.deepEqual({ from: edit.from, to: edit.to }, { from: drawing.payload.from, to: drawing.payload.to })
+    const saved = source.slice(0, edit.from) + edit.text + source.slice(edit.to)
+    assert(saved.startsWith(document.slice(0, document.indexOf(data))))
+    assert(saved.endsWith(suffix + notes))
+    assert.equal(readDrawing(saved).scene.elements[1].x, 45)
+  }
+})
+
+test('正文真的有两个独立 Drawing 时拒绝保存，而不是猜一个写回', async () => {
+  const { readDrawing, writeDrawing } = await import('../src/format.ts')
+  for (const kind of ['json', 'compressed-json']) {
+    const source = fixture(kind) + fixture(kind).slice(prefix.length)
+    assert.throws(() => readDrawing(source), /drawing-section/)
+    assert.throws(() => writeDrawing(source, { elements: [{ id: 'shape001', fields: { x: 45 } }] }), /drawing-section/)
+  }
+})
+
+test('文字记录内的 Markdown 围栏不吞掉后面的真实 Drawing', async () => {
+  const { readDrawing, writeDrawing } = await import('../src/format.ts')
+  const source = fixture()
+  const label = '示例：\n```js\nconst a = 1\n```'
+  const edits = writeDrawing(source, { elements: [{ id: 'label001', fields: { originalText: label } }] })
+  let saved = source
+  for (const edit of edits.sort((a, b) => b.from - a.from)) {
+    saved = saved.slice(0, edit.from) + edit.text + saved.slice(edit.to)
+  }
+  assert.equal(readDrawing(saved).scene.elements[0].originalText, label)
+})
+
 test('第一段文字紧接标题，不在 Obsidian 中引入额外的段首换行', async () => {
   const { newDrawing, writeDrawing } = await import('../src/format.ts')
   let source = newDrawing()
