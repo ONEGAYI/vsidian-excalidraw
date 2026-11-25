@@ -50,9 +50,10 @@ exports.run = async () => {
     } else if (input.action === 'web-policy-get') {
       data = await vscode.commands.executeCommand('onegayi.vsidian._test.addonSettingsGet', { addonId: addon.id })
     } else if (input.action === 'web-policy-show') {
-      await vscode.commands.executeCommand('onegayi.vsidian._test.addonSettingsArea', { addonId: addon.id })
+      await vscode.commands.executeCommand('onegayi.vsidian.openSettings')
     } else if (input.action === 'web-policy-close') {
       await vscode.commands.executeCommand('onegayi.vsidian._test.addonSettingsCloseArea')
+      await vscode.commands.executeCommand('onegayi.vsidian._test.closeSettingsPage')
     } else if (input.action === 'snapshot') {
       const document = await vscode.workspace.openTextDocument(uri)
       data = { source: document.getText(), dirty: document.isDirty, version: document.version }
