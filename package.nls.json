@@ -1,0 +1,7 @@
+{
+  "extension.displayName": "Vsidian Excalidraw",
+  "extension.description": "Read and edit Obsidian Excalidraw drawings without converting the Markdown file.",
+  "editor.displayName": "Excalidraw Board",
+  "open.title": "Open in Excalidraw Board",
+  "create.title": "New Excalidraw Drawing"
+}

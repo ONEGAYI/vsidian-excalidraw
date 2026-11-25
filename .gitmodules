@@ -1,0 +1,3 @@
+[submodule "upstream/obsidian-excalidraw-plugin"]
+	path = upstream/obsidian-excalidraw-plugin
+	url = https://github.com/zsviczian/obsidian-excalidraw-plugin.git
