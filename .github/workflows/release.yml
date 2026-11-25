@@ -3,17 +3,25 @@ name: Release
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '补发已有标签（如 v0.1.0）'
+        required: true
+        type: string
 
 permissions: {}
 
 jobs:
   release:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       actions: read
       contents: write
     outputs:
+      tag: ${{ steps.candidate.outputs.tag }}
       vsix: ${{ steps.candidate.outputs.vsix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -27,10 +35,16 @@ jobs:
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a release tag in vX.Y.Z format."
+            exit 1
+          fi
+          git checkout --detach "refs/tags/$RELEASE_TAG"
           version="$(node -p "require('./package.json').version")"
-          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version."
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match package.json version $version."
             exit 1
           fi
           if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
@@ -46,16 +60,18 @@ jobs:
             exit 1
           fi
           name="$(node -p "require('./package.json').name")"
-          printf 'run_id=%s\nvsix=%s-%s.vsix\n' "$run_id" "$name" "$version" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\nrun_id=%s\nvsix=%s-%s.vsix\n' "$RELEASE_TAG" "$run_id" "$name" "$version" >> "$GITHUB_OUTPUT"
       - name: 用 CI 产物创建 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.candidate.outputs.tag }}
           RUN_ID: ${{ steps.candidate.outputs.run_id }}
           VSIX: ${{ steps.candidate.outputs.vsix }}
         run: |
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name vsix --dir out
-          gh release create "$GITHUB_REF_NAME" "out/$VSIX" --repo "$GITHUB_REPOSITORY" \
-            --verify-tag --notes-from-tag --title "Vsidian Excalidraw $GITHUB_REF_NAME"
+          # --notes-from-tag 从检出的本地仓库读取，不能与 --repo 同用。
+          gh release create "$RELEASE_TAG" "out/$VSIX" \
+            --verify-tag --notes-from-tag --title "Vsidian Excalidraw $RELEASE_TAG"
 
   marketplace:
     needs: release
@@ -68,6 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ needs.release.outputs.tag }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -77,8 +94,9 @@ jobs:
       - name: 从 GitHub Release 下载 VSIX
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
           VSIX: ${{ needs.release.outputs.vsix }}
-        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$VSIX" --dir out
+        run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$VSIX" --dir out
       - name: 发布到 VS Code Marketplace
         env:
           VSIX: ${{ needs.release.outputs.vsix }}
