@@ -8,6 +8,8 @@ const mimeTypes = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
   '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml',
 } as const
+const pdfFileLimit = 32 * 1024 * 1024
+const drawingPdfLimit = 2 * pdfFileLimit
 
 export function stageImportedImages(source: Uri, images: ImportedImage[], patch: DrawingPatch) {
   if (!Array.isArray(images)) throw new Error('invalid-image-import')
@@ -55,8 +57,12 @@ export async function localResource(source: Uri, target: string): Promise<Uri | 
 export async function readAssets(uri: Uri, scene: Scene, attachments: Map<string, string>, report: (error: unknown) => void) {
   const files = { ...scene.files }
   const missing: string[] = []
-  const references: LocalReferences = { cards: Object.create(null), images: Object.create(null) }
+  const references: LocalReferences = {
+    cards: Object.create(null), images: Object.create(null), imageLinks: Object.create(null), pdfs: Object.create(null),
+  }
   const cached = new Map<string, Promise<LocalContent | null>>()
+  const pdfLoads = new Map<string, Promise<boolean>>()
+  let pdfBytes = 0
   function load(target: NonNullable<ReturnType<typeof localReference>>) {
     const key = target.path + '#' + target.fragment
     const existing = cached.get(key)
@@ -65,12 +71,30 @@ export async function readAssets(uri: Uri, scene: Scene, attachments: Map<string
       try {
         const file = await localResource(uri, target.path)
         if (!file) return null
-        const stat = await workspace.fs.stat(file)
-        if (stat.size > (target.kind === 'pdf' ? 32 * 1024 * 1024 : 1024 * 1024)) return null
         if (target.kind === 'pdf') {
-          const bytes = await workspace.fs.readFile(file)
-          return { kind: 'pdf' as const, bytes: Buffer.from(bytes).toString('base64'), page: target.page, rect: target.rect }
+          let pending = pdfLoads.get(file.path)
+          if (!pending) {
+            pending = (async () => {
+              const { size } = await workspace.fs.stat(file)
+              if (size > pdfFileLimit || pdfBytes + size > drawingPdfLimit) return false
+              pdfBytes += size
+              let retained = 0
+              try {
+                const bytes = await workspace.fs.readFile(file)
+                if (bytes.byteLength > pdfFileLimit || pdfBytes - size + bytes.byteLength > drawingPdfLimit) return false
+                references.pdfs[file.path] = Buffer.from(bytes).toString('base64')
+                retained = bytes.byteLength
+                return true
+              } finally {
+                pdfBytes += retained - size
+              }
+            })()
+            pdfLoads.set(file.path, pending)
+          }
+          if (!await pending) return null
+          return { kind: 'pdf' as const, file: file.path, page: target.page, rect: target.rect }
         }
+        if ((await workspace.fs.stat(file)).size > 1024 * 1024) return null
         const source = (await workspace.openTextDocument(file)).getText()
         const preview = notePreview(source, target.fragment)
         return preview ? { kind: 'note' as const, ...preview } : null
@@ -99,6 +123,7 @@ export async function readAssets(uri: Uri, scene: Scene, attachments: Map<string
         const content = await load(reference)
         if (content) {
           references.images[id] = content
+          references.imageLinks[id] = `[[${reference.path}${reference.fragment ? '#' + reference.fragment : ''}]]`
           return
         }
       }

@@ -1,6 +1,7 @@
+import { defineAddonPage } from 'vsidian-addon-sdk'
 import { isDrawing, type Scene } from './format.ts'
 import { strings } from './strings.ts'
-import type { LocalContent } from './references.ts'
+import type { LocalReferences } from './protocol.ts'
 
 type Target = { fsPath: string; relPath: string; text: string }
 type PageSdk = {
@@ -41,8 +42,8 @@ function mountPage(sdk: PageSdk) {
       let image: string | null
       let unavailable = !result.ok || !result.result
       try {
-        const drawing = result.ok ? result.result as { scene: Scene; imageReferences: Record<string, LocalContent> } | null : null
-        image = drawing ? await renderThumbnail(drawing.scene, drawing.imageReferences, assetRoot) : null
+        const drawing = result.ok ? result.result as { scene: Scene; references: Pick<LocalReferences, 'images' | 'pdfs'> } | null : null
+        image = drawing ? await renderThumbnail(drawing.scene, drawing.references, assetRoot, signal) : null
       } catch (error) {
         console.error('Could not render Excalidraw preview:', error)
         image = null
@@ -76,10 +77,4 @@ function mountPage(sdk: PageSdk) {
   })
 }
 
-// Vsidian's defineAddonPage bridge, as documented for IIFE editor entries.
-const shell = globalThis as typeof globalThis & {
-  __vsidianAddonPages?: Array<{ addonId: string; factory: (sdk: PageSdk) => void; registeredAt: number }>
-}
-;(shell.__vsidianAddonPages ??= []).push({
-  addonId: 'ONEGAYI.vsidian-excalidraw', factory: mountPage, registeredAt: Date.now(),
-})
+defineAddonPage('ONEGAYI.vsidian-excalidraw', mountPage)

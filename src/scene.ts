@@ -6,14 +6,24 @@ export const isPortableElementId = (id: string): boolean => /^[A-Za-z0-9-]{8}$/.
 
 // Excalidraw renders generated iframe HTML independently of validateEmbeddable.
 // Project only what the renderer sees; diffs still preserve the source type and custom data.
-export function displayElements(elements: readonly Element[]): Element[] {
-  return elements.map(element => element.type === 'iframe' ? { ...element, type: 'rectangle' } : element)
+export function displayElements(elements: readonly Element[], sourceLinks: Readonly<Record<string, string>> = {}): Element[] {
+  return elements.map(element => {
+    if (element.type === 'iframe') return { ...element, type: 'rectangle' }
+    if (element.type === 'image' && !element.link && element.fileId && Object.hasOwn(sourceLinks, element.fileId)) {
+      return { ...element, link: sourceLinks[element.fileId] }
+    }
+    return element
+  })
 }
 
 export function isPortableText(text: string): boolean {
   return !/^#{1,2}[ \t]+(?:Excalidraw Data|Text Elements|Element Links|Embedded [Ff]iles|Drawing)[ \t]*\r?$/m.test(text)
     && !/^%%[ \t]*\r?$/m.test(text)
     && !/(?:^|[ \t])\^[\w!-]{8}[ \t]*\r?$/m.test(text)
+}
+
+export function canPasteSceneElements(elements?: readonly { type: string }[]): boolean {
+  return !elements?.some(element => element.type === 'image' || element.type === 'iframe')
 }
 
 export function createSceneDiff(storedIds: Iterable<string>) {

@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Element, Scene } from './format.ts'
 import { imageImportLimit, importedImageTypes, type ImportedImage, type Message, type Request, type State } from './protocol.ts'
-import { createSceneDiff, displayElements, isPortableText } from './scene.ts'
+import { canPasteSceneElements, createSceneDiff, displayElements, isPortableText } from './scene.ts'
 import { strings } from './strings.ts'
 import { renderReferenceImages } from './reference-art.ts'
 import { webLink } from './web.ts'
@@ -39,14 +39,14 @@ let viewed = false
 let importFlight = Promise.resolve()
 let imageNotice: string | undefined
 const pendingImages = new Map<string, ImportedImage>()
-let incomingState = 0
+let incomingState: AbortController | undefined
 let pdfCards: Awaited<ReturnType<typeof renderReferenceImages>>['files'] = {}
 let permittedWebOrigins = new Set<string>()
 
 const capture = () => structuredClone(api!.getSceneElementsIncludingDeleted()) as unknown as Element[]
 
 function request(command: { kind: 'patch'; version: number; patch: ReturnType<typeof diff>; images?: ImportedImage[] }
-  | { kind: 'save' | 'markdown' | 'undo' | 'redo' }) {
+  | { kind: 'save' | 'undo' | 'redo' } | { kind: 'markdown'; preserveBoard?: true }) {
   const id = ++nextId
   return new Promise<Extract<Message, { kind: 'result' }>>(resolve => {
     waiting.set(id, resolve)
@@ -114,7 +114,7 @@ async function finishOperation(kind: 'save' | 'markdown' | 'undo' | 'redo' | 'do
   await importFlight
   if (kind === 'markdown' && (!enabled || issue)) {
     // Retain the canvas and its pending changes, and open the underlying file in the other tab.
-    await request({ kind })
+    await request({ kind, preserveBoard: true })
     return
   }
   if (api?.getAppState().editingTextElement) {
@@ -141,11 +141,11 @@ function changeMode() {
   }
 }
 
-function install(scene: Scene) {
+function install(scene: Scene, sourceLinks?: Readonly<Record<string, string>>) {
   const old = api?.getAppState()
   const persisted = scene.appState ?? {}
   initial = {
-    elements: displayElements(scene.elements) as unknown as ExcalidrawInitialDataState['elements'],
+    elements: displayElements(scene.elements, sourceLinks) as unknown as ExcalidrawInitialDataState['elements'],
     files: scene.files as ExcalidrawInitialDataState['files'],
     appState: {
       ...(typeof persisted.viewBackgroundColor === 'string' ? { viewBackgroundColor: persisted.viewBackgroundColor } : {}),
@@ -229,7 +229,7 @@ function applyState(data: State, cards: typeof pdfCards = {}) {
     doc = data
     issue = undefined
     revision = data.version
-    if (data.scene) install(data.scene)
+    if (data.scene) install(data.scene, data.references?.imageLinks)
     if (first || data.force || !data.scene) editing = false
   }
 }
@@ -252,7 +252,8 @@ window.addEventListener('message', ({ data, origin }: MessageEvent<Message>) => 
       break
     case 'state': {
       if (data.enabled && !data.force && data.version < revision) return
-      const incoming = ++incomingState
+      incomingState?.abort()
+      const incoming = incomingState = new AbortController()
       enabled = data.enabled
       dirty = data.dirty
       if (!enabled) break
@@ -261,11 +262,14 @@ window.addEventListener('message', ({ data, origin }: MessageEvent<Message>) => 
         (entry): entry is [string, Extract<NonNullable<typeof entry[1]>, { kind: 'pdf' }>] => entry[1]?.kind === 'pdf'))
       if (scene && references && (Object.keys(references.images).length || Object.keys(pdfs).length)) {
         const rootUrl = new URL('./', import.meta.url).href
-        void Promise.all([renderReferenceImages(references.images, rootUrl), renderReferenceImages(pdfs, rootUrl)])
+        void Promise.all([
+          renderReferenceImages(references.images, references.pdfs, rootUrl, incoming.signal),
+          renderReferenceImages(pdfs, references.pdfs, rootUrl, incoming.signal),
+        ])
           .then(([images, cards]) => {
-            if (incoming !== incomingState || (!data.force && data.version < revision)) return
+            if (incoming.signal.aborted || (!data.force && data.version < revision)) return
             applyState({ ...data, scene: { ...scene, files: { ...scene.files, ...images.files } },
-              references: { cards: references.cards, images: {} }, missing: [...data.missing, ...images.missing] }, cards.files)
+              references: { ...references, images: {}, pdfs: {} }, missing: [...data.missing, ...images.missing] }, cards.files)
             render()
           })
         break
@@ -392,8 +396,7 @@ function render() {
           event.preventDefault()
           if (element.link) bridge.postMessage({ kind: 'link', link: element.link })
         }}
-        onPaste={(data, event) => !event?.clipboardData?.files.length
-          && !data.elements?.some(element => element.type === 'image')}
+        onPaste={(data, event) => !event?.clipboardData?.files.length && canPasteSceneElements(data.elements)}
         validateEmbeddable={link => !!webLink(link) || (doc?.scene?.elements.some(element => element.link === link
           && Object.hasOwn(doc?.references?.cards ?? {}, element.id)) ?? false)}
         renderEmbeddable={element => {

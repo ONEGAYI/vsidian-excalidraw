@@ -3,13 +3,13 @@ import type { LocalContent } from './references.ts'
 
 let worker: Promise<string> | undefined
 
-export async function renderPdfPage(content: Extract<LocalContent, { kind: 'pdf' }>) {
+export async function renderPdfPage(content: Extract<LocalContent, { kind: 'pdf' }>, bytes: string) {
   GlobalWorkerOptions.workerSrc = await (worker ??= (async () => {
     const response = await fetch(new URL('./pdf-worker.js', import.meta.url))
     if (!response.ok) throw new Error('Could not load the local PDF renderer')
     return URL.createObjectURL(new Blob([await response.text()], { type: 'text/javascript' }))
   })())
-  const data = Uint8Array.from(atob(content.bytes), c => c.charCodeAt(0))
+  const data = Uint8Array.from(atob(bytes), c => c.charCodeAt(0))
   const task = getDocument({
     data, stopAtErrors: true,
     cMapUrl: new URL('./pdf-assets/cmaps/', import.meta.url).href,

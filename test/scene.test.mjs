@@ -28,3 +28,21 @@ test('只提交实际改动、为新元素分配 Obsidian ID，并同步绑定�
   assert.deepEqual(diff(after, [...after.slice(0, 3), { ...after[3], isDeleted: true }]).elements,
     [{ id: patch.elements[2].id, fields: { isDeleted: true } }])
 })
+
+test('PDF 图片有打开源文件的入口，调整位置不把派生链接写回', async () => {
+  const { displayElements, createSceneDiff } = await import('../src/scene.ts')
+  const source = { id: 'pdf00001', type: 'image', fileId: 'pdf-page', link: null, x: 0 }
+  const link = '[[assets/pages.pdf#page=2]]'
+  const [shown] = displayElements([source], { 'pdf-page': link })
+  assert.equal(shown.link, link)
+  assert.equal(source.link, null)
+  assert.deepEqual(createSceneDiff([source.id])([shown], [{ ...shown, x: 40 }]).elements,
+    [{ id: source.id, fields: { x: 40 } }])
+})
+
+test('画板剪贴板允许普通元素，但拒绝绕过导入入口的图片或原始 HTML 帧', async () => {
+  const { canPasteSceneElements } = await import('../src/scene.ts')
+  assert.equal(canPasteSceneElements([{ type: 'rectangle' }]), true)
+  assert.equal(canPasteSceneElements([{ type: 'rectangle' }, { type: 'image' }]), false)
+  assert.equal(canPasteSceneElements([{ type: 'rectangle' }, { type: 'iframe' }]), false)
+})

@@ -259,13 +259,25 @@ if (stage === 'seed') {
   console.log('PASS: Obsidian created actual URL elements and an HTML frame in a plain graph')
 } else if (['vscode', 'create', 'image-import', 'image-return', 'preview-vscode', 'references-vscode', 'web-vscode'].includes(stage)) {
   if (stage === 'preview-vscode') await writeFile(path.join(vault, gallery), gallerySource)
+  if (stage === 'preview-vscode') {
+    for (const file of cases) await cp(path.join(session, file + '.with-import'), path.join(vault, file))
+    const formats = await Promise.all(cases.map(async file => readDrawing(await readFile(path.join(vault, file), 'utf8')).payload.kind))
+    assert.deepEqual(formats, ['compressed-json', 'json'], 'A two-format preview test requires one drawing of each encoding')
+  }
   if (stage === 'vscode' || stage === 'image-import') {
     for (const file of cases) await cp(path.join(session, file + '.original'), path.join(vault, file))
+  }
+  if (stage === 'vscode') {
+    await writeFile(path.join(vault, 'Tagged.excalidraw.md'), '---\ntags: [excalidraw]\n---\n\n# A note about Excalidraw\n')
+    await writeFile(path.join(vault, 'Incomplete.excalidraw.md'), '---\nexcalidraw-plugin: parsed\n---\n\n# A drawing without scene data\n')
   }
   const scope = path.join(session, stage + '-user')
   await mkdir(path.join(scope, 'User'), { recursive: true })
   await writeFile(path.join(scope, 'User', 'settings.json'), JSON.stringify({
-    'workbench.startupEditor': 'none', 'window.zoomLevel': 0, 'security.workspace.trust.enabled': false,
+    'workbench.startupEditor': 'none',
+    // A narrow Excalidraw view only opens links from their icons, not the artwork.
+    'window.zoomLevel': stage === 'references-vscode' ? -1 : 0,
+    'security.workspace.trust.enabled': false,
     'window.restoreWindows': 'none', 'files.autoSave': 'off', 'workbench.colorTheme': 'Default Light Modern',
     'files.simpleDialog.enable': true,
   }))
@@ -452,8 +464,9 @@ async function vscodeFlow(page) {
   }
   const hasView = async (view, file) => retry(async () => {
     const snapshot = await command('snapshot', file)
-    return snapshot.active === view && snapshot
-  }, 'VS Code did not activate ' + view)
+    return snapshot.active === view && snapshot.activePath &&
+      path.relative(snapshot.activePath, path.join(vault, file)) === '' && snapshot
+  }, 'VS Code did not activate ' + view + ' for ' + file, 10_000)
   const frameWith = (locator) => retry(async () => {
     for (const frame of page.frames()) {
       if (!await frame.locator(locator).first().isVisible()) continue
@@ -573,9 +586,32 @@ async function vscodeFlow(page) {
     await frame.getByText(sectionMarker, { exact: true }).waitFor({ state: 'visible', timeout: 6000 })
     await frame.getByText(blockMarker, { exact: true }).waitFor({ state: 'visible', timeout: 6000 })
     assert.equal(await frame.getByText(/Do not show this/).filter({ visible: true }).count(), 0)
-    await retry(() => frame.evaluate(hasSecondPdfPage), 'Vsidian did not paint the referenced second PDF page')
+    const pdfHit = await retry(() => frame.evaluate(hasSecondPdfPage), 'Vsidian did not paint the referenced second PDF page')
     await page.screenshot({ path: path.join(session, 'vscode-local-references.png') })
     console.log('PASS: Vsidian paints both resolved note selections and PDF page 2')
+    const paintedCanvas = frame.locator('.excalidraw canvas').nth(pdfHit.canvas)
+    const pdfCanvas = await paintedCanvas.boundingBox()
+    assert(pdfCanvas, 'The painted PDF canvas was no longer visible')
+    const pdfX = pdfCanvas.x + pdfCanvas.width * pdfHit.x
+    const pdfY = pdfCanvas.y + pdfCanvas.height * pdfHit.y
+    await page.mouse.move(pdfX, pdfY)
+    await retry(() => paintedCanvas.evaluate((canvas, { x, y }) => {
+      const box = canvas.getBoundingClientRect()
+      const hit = document.elementFromPoint(box.left + box.width * x, box.top + box.height * y)
+      return hit && getComputedStyle(hit).cursor === 'pointer'
+    }, pdfHit), 'The painted PDF did not expose a source link at its visible artwork', 4000)
+    await page.mouse.click(pdfX, pdfY)
+    await retry(async () => {
+      const active = await command('active')
+      return active.activePath && path.relative(active.activePath, path.join(vault, localPdf)) === ''
+    }, 'Clicking the PDF preview did not open its original attachment', 6000).catch(async error => {
+      const notices = await page.locator('.notification-toast').allTextContents()
+      console.error('VS Code after following the PDF link:', await command('active'), notices)
+      throw error
+    })
+    await command('board', localBoard)
+    await hasView(boardView, localBoard)
+    frame = await frameWith('.board-toolbar')
     await frame.getByRole('button', { name: 'Open source: ' + localNote + '#Selected section', exact: true }).click()
     await hasView(markdownView, localNote)
     assert.equal((await command('snapshot', localNote)).source, referencesNote)
@@ -751,11 +787,21 @@ async function vscodeFlow(page) {
     return
   }
 
-  await command('default', 'Readme.md')
-  await hasView(markdownView, 'Readme.md')
-  console.log('PASS: ordinary Markdown still opens in Vsidian')
+  for (const [file, heading] of [['Tagged.excalidraw.md', 'A note about Excalidraw'],
+    ['Incomplete.excalidraw.md', 'A drawing without scene data']]) {
+    await command('default', file)
+    await hasView(markdownView, file)
+    const frame = await frameWith('.cm-content, .markdown-preview-view')
+    await frame.getByText(heading, { exact: true }).first().waitFor({ state: 'visible', timeout: 5000 })
+  }
+  console.log('PASS: a plain tag or an incomplete scene does not replace the Markdown editor')
+  const openBoard = page.getByRole('button', { name: /Open in Excalidraw Board/ })
   for (const [i, file] of cases.entries()) {
-    await command('markdown', file)
+    await command('default', file)
+    await hasView(boardView, file)
+    const firstBoard = await frameWith('.board-toolbar')
+    await retry(() => firstBoard.evaluate(readPaint), 'The default drawing view did not paint ' + file)
+    await firstBoard.getByRole('button', { name: 'Open Markdown', exact: true }).click()
     await hasView(markdownView, file)
     await frameWith('.cm-content, .markdown-preview-view')
     await retry(async () => {
@@ -764,8 +810,9 @@ async function vscodeFlow(page) {
         if (await note.isVisible()) return true
       }
     }, 'The original note was not visible in the Markdown view')
-    await command('board', file)
+    await openBoard.click({ timeout: 5000 })
     await hasView(boardView, file)
+    console.log('PASS: default canvas and both visible switches', file)
     const frame = await frameWith('.board-toolbar')
     const boardButton = text => frame.locator('.board-toolbar').getByRole('button', { name: text, exact: true })
     await boardButton('Edit drawing').waitFor({ state: 'visible' })
@@ -845,7 +892,7 @@ async function vscodeFlow(page) {
     const unsaved = await hasView(markdownView, file)
     assert(unsaved.source.includes(editedLabel + ' ^') && unsaved.dirty, 'Switching to Markdown lost unsaved changes')
     assert(unsaved.source.includes(invariant))
-    await command('board', file)
+    await openBoard.click({ timeout: 5000 })
     await hasView(boardView, file)
     if (await boardButton('Edit drawing').count()) await boardButton('Edit drawing').click()
     await boardButton('Save').click()
@@ -893,18 +940,23 @@ function readPaint(requireGreen = false) {
 }
 
 function hasSecondPdfPage() {
-  for (const canvas of document.querySelectorAll('.excalidraw canvas')) {
+  for (const [index, canvas] of Array.from(document.querySelectorAll('.excalidraw canvas')).entries()) {
     if (!canvas.width || !canvas.height) continue
     const ctx = canvas.getContext('2d')
     if (!ctx) continue
     const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
-    let secondPage = 0, firstPage = 0
+    let secondPage = 0, firstPage = 0, xSum = 0, top = canvas.height
     for (let i = 0; i < data.length; i += 4) {
       if (data[i + 3] < 200) continue
-      if (data[i] > 175 && data[i + 1] < 55 && data[i + 2] > 140) secondPage++
+      if (data[i] > 175 && data[i + 1] < 55 && data[i + 2] > 140) {
+        secondPage++
+        xSum += (i / 4) % canvas.width
+        top = Math.min(top, Math.floor(i / 4 / canvas.width))
+      }
       if (data[i] > 210 && data[i + 1] > 130 && data[i + 2] < 75) firstPage++
     }
-    if (secondPage > 100 && firstPage === 0) return true
+    // Click near the top of the visible artwork, above the board's floating bottom bar.
+    if (secondPage > 100 && firstPage === 0) return { canvas: index, x: xSum / secondPage / canvas.width, y: (top + 5) / canvas.height }
   }
   return false
 }

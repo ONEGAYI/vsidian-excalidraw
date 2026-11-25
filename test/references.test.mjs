@@ -25,3 +25,11 @@ test('note preview selects a real heading or a block and renders inert Markdown'
   assert.equal(notePreview(source, 'missing'), undefined)
   assert.match(notePreview('<script>alert(1)</script>', '').html, /&lt;script&gt;/)
 })
+
+test('独立块 ID 选中完整的列表和表格，不只选最后一项', () => {
+  const list = notePreview('Overview\n\n- First\n- Second\n\n^list\n\nNext', '^list').html
+  assert.match(list, /<ul>\s*<li>First<\/li>\s*<li>Second<\/li>/)
+  assert.doesNotMatch(list, /Overview|Next|\^list/)
+  const table = notePreview('| Header |\n| ------ |\n| Value  |\n\n^table', '^table').html
+  assert.match(table, /<table>[\s\S]*<th>Header<\/th>[\s\S]*<td>Value<\/td>/)
+})

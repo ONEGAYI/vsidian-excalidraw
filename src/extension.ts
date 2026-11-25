@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { isAbsolute, posix } from 'node:path'
 import {
   commands, env, extensions, Position, Range, TabInputCustom, TabInputText, Uri, window, workspace, WorkspaceEdit,
-  type Disposable, type ExtensionContext, type TextDocument, type WebviewPanel,
+  type Disposable, type ExtensionContext, type Tab, type TextDocument, type ViewColumn, type WebviewPanel,
 } from 'vscode'
 import { localResource, readAssets, stageImportedImages } from './assets.ts'
 import { isDrawing, newDrawing, readDrawing, writeDrawing } from './format.ts'
@@ -39,17 +39,66 @@ export async function activate(context: ExtensionContext) {
   let webOrigins: string[] = []
   const boards = new Set<() => void>()
   const webPolicies = new Set<() => void>()
+  const examinedTabs = new WeakSet<Tab>()
+  const openingMarkdown = new Set<string>()
   const output = window.createOutputChannel('Vsidian Excalidraw')
   const report = (error: unknown) => output.appendLine(error instanceof Error ? error.stack ?? error.message : String(error))
 
-  function activeUri() {
-    const input = window.tabGroups.activeTabGroup.activeTab?.input
+  function tabUri(tab: Tab | undefined) {
+    const input = tab?.input
     return input instanceof TabInputCustom || input instanceof TabInputText ? input.uri : undefined
   }
+
+  const markdownKey = (uri: Uri, column: ViewColumn) => column + ':' + uri.toString()
+
+  async function openMarkdown(uri: Uri, viewColumn: ViewColumn) {
+    const key = markdownKey(uri, viewColumn)
+    openingMarkdown.add(key)
+    try {
+      await commands.executeCommand('vscode.openWith', uri, MARKDOWN, { viewColumn, preview: false })
+      const tab = window.tabGroups.all.find(group => group.viewColumn === viewColumn)?.activeTab
+      if (tab?.input instanceof TabInputCustom && tab.input.viewType === MARKDOWN
+        && tab.input.uri.toString() === uri.toString()) examinedTabs.add(tab)
+    } finally {
+      openingMarkdown.delete(key)
+    }
+  }
+
+  async function closePreviousView(document: TextDocument, from: Tab, view: string) {
+    const active = from.group.activeTab
+    // Closing a dirty custom editor can revert the shared TextDocument.
+    if (!document.isDirty && from.group.tabs.includes(from) && active !== from &&
+      active?.input instanceof TabInputCustom && active.input.viewType === view &&
+      active.input.uri.toString() === document.uri.toString()) await window.tabGroups.close(from)
+  }
+
+  async function openBoard(document: TextDocument, from?: Tab) {
+    await commands.executeCommand('vscode.openWith', document.uri, BOARD, { viewColumn: from?.group.viewColumn, preview: false })
+    if (from) await closePreviousView(document, from, BOARD)
+  }
+
   function syncTitle() {
-    const uri = activeUri()
+    const tab = window.tabGroups.activeTabGroup.activeTab
+    const uri = tabUri(tab)
     const doc = uri && workspace.textDocuments.find(item => item.uri.toString() === uri.toString())
-    void commands.executeCommand('setContext', 'vsidianExcalidraw.canOpen', enabled && !!doc && isDrawing(doc.getText()))
+    const drawing = enabled && !!doc && isDrawing(doc.getText())
+    void commands.executeCommand('setContext', 'vsidianExcalidraw.canOpen', drawing)
+    return { tab, doc, drawing }
+  }
+
+  function syncTab() {
+    const { tab, doc, drawing } = syncTitle()
+    if (!enabled || !doc || !(tab?.input instanceof TabInputCustom) || tab.input.viewType !== MARKDOWN || examinedTabs.has(tab)) return
+    // Check each tab on first activation, not while the user edits its frontmatter.
+    examinedTabs.add(tab)
+    if (!drawing || openingMarkdown.has(markdownKey(doc.uri, tab.group.viewColumn))) return
+    try {
+      readDrawing(doc.getText())
+    } catch (error) {
+      report(error)
+      return
+    }
+    void openBoard(doc, tab).catch(report)
   }
 
   async function resolveCustomTextEditor(document: TextDocument, panel: WebviewPanel) {
@@ -110,9 +159,13 @@ export async function activate(context: ExtensionContext) {
           if (choice === words.reload) await publish(true)
           return
         }
-        case 'markdown':
-          await commands.executeCommand('vscode.openWith', document.uri, MARKDOWN, { viewColumn: panel.viewColumn, preview: false })
-          break
+        case 'markdown': {
+          const from = panel.active ? window.tabGroups.activeTabGroup.activeTab : undefined
+          await openMarkdown(document.uri, panel.viewColumn ?? window.tabGroups.activeTabGroup.viewColumn)
+          await post({ kind: 'result', id: msg.id, version: document.version })
+          if (from && !msg.preserveBoard) await closePreviousView(document, from, MARKDOWN)
+          return
+        }
         case 'link': {
           if (!enabled) return
           const url = webLink(msg.link)
@@ -122,7 +175,7 @@ export async function activate(context: ExtensionContext) {
             const target = localReference(msg.link, true)
             if (target) {
               const found = await localResource(document.uri, target.path)
-              if (found && target.kind === 'note') await commands.executeCommand('vscode.openWith', found, MARKDOWN)
+              if (found && target.kind === 'note') await openMarkdown(found, window.tabGroups.activeTabGroup.viewColumn)
               if (found && target.kind === 'pdf') await commands.executeCommand('vscode.open', found.with({ fragment: target.fragment }))
             }
           }
@@ -238,7 +291,8 @@ export async function activate(context: ExtensionContext) {
           try {
             const drawing = readDrawing(payload.text)
             const assets = await readAssets(uri, drawing.scene, drawing.attachments, report)
-            return { scene: { ...drawing.scene, files: assets.files }, imageReferences: assets.references.images }
+            const { images, pdfs } = assets.references
+            return { scene: { ...drawing.scene, files: assets.files }, references: { images, pdfs } }
           } catch (error) {
             report(error)
             return null
@@ -262,19 +316,20 @@ export async function activate(context: ExtensionContext) {
   const subscriptions: Disposable[] = [
     addon, output,
     window.registerCustomEditorProvider(BOARD, { resolveCustomTextEditor }, { webviewOptions: { retainContextWhenHidden: true } }),
-    window.tabGroups.onDidChangeTabs(syncTitle),
-    window.tabGroups.onDidChangeTabGroups(syncTitle),
-    workspace.onDidOpenTextDocument(syncTitle),
+    window.tabGroups.onDidChangeTabs(syncTab),
+    window.tabGroups.onDidChangeTabGroups(syncTab),
+    workspace.onDidOpenTextDocument(syncTab),
     workspace.onDidChangeTextDocument(event => {
-      if (event.document.uri.toString() === activeUri()?.toString()) syncTitle()
+      if (event.document.uri.toString() === tabUri(window.tabGroups.activeTabGroup.activeTab)?.toString()) syncTitle()
     }),
     commands.registerCommand('vsidianExcalidraw.open', async (resource?: Uri) => {
       if (!enabled) return window.showWarningMessage(words.disabled)
-      const uri = resource ?? activeUri()
+      const from = window.tabGroups.activeTabGroup.activeTab
+      const uri = resource ?? tabUri(from)
       if (!uri || !/\.md$/i.test(uri.path)) return window.showWarningMessage(words.notDrawing)
       const document = await workspace.openTextDocument(uri)
       if (!isDrawing(document.getText())) return window.showWarningMessage(words.notDrawing)
-      await commands.executeCommand('vscode.openWith', uri, BOARD, { preview: false })
+      await openBoard(document, tabUri(from)?.toString() === uri.toString() ? from : undefined)
     }),
     commands.registerCommand('vsidianExcalidraw.create', async () => {
       if (!enabled) return window.showWarningMessage(words.disabled)
@@ -301,5 +356,5 @@ export async function activate(context: ExtensionContext) {
     }),
   ]
   context.subscriptions.push(...subscriptions)
-  syncTitle()
+  syncTab()
 }

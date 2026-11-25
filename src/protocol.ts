@@ -10,12 +10,15 @@ export type ImportedImage = { id: string; dataURL: string }
 export type LocalReferences = {
   cards: Record<string, LocalContent | null>
   images: Record<string, LocalContent>
+  imageLinks: Record<string, string>
+  pdfs: Record<string, string>
 }
 
 export type Request =
   | { kind: 'ready' | 'reload' }
   | { kind: 'patch'; id: number; version: number; patch: DrawingPatch; images?: ImportedImage[] }
-  | { kind: 'save' | 'markdown' | 'undo' | 'redo'; id: number }
+  | { kind: 'save' | 'undo' | 'redo'; id: number }
+  | { kind: 'markdown'; id: number; preserveBoard?: true }
   | { kind: 'link'; link: string }
 
 export type State = {

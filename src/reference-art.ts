@@ -1,11 +1,20 @@
 import type { BinaryFileData } from '@excalidraw/excalidraw/types'
 import type { LocalContent } from './references.ts'
 
-export async function referenceArtwork(reference: LocalContent, assetRoot: string): Promise<BinaryFileData['dataURL']> {
+let pdfQueue: Promise<void> = Promise.resolve()
+
+async function referenceArtwork(reference: LocalContent, pdfs: Record<string, string>, assetRoot: string, signal?: AbortSignal): Promise<BinaryFileData['dataURL']> {
   if (reference.kind === 'pdf') {
     const url = new URL('./pdf-render.js', assetRoot).href
-    const { renderPdfPage }: typeof import('./pdf-render.ts') = await import(url)
-    return await renderPdfPage(reference) as BinaryFileData['dataURL']
+    const page = pdfQueue.then(async () => {
+      signal?.throwIfAborted()
+      const { renderPdfPage }: typeof import('./pdf-render.ts') = await import(url)
+      signal?.throwIfAborted()
+      return await renderPdfPage(reference, pdfs[reference.file]) as BinaryFileData['dataURL']
+    })
+    // Continue the queue after either outcome; the original rejection still reaches the caller.
+    pdfQueue = page.then(() => {}, () => {})
+    return page
   }
   const canvas = document.createElement('canvas')
   canvas.width = 640
@@ -36,19 +45,20 @@ export async function referenceArtwork(reference: LocalContent, assetRoot: strin
   return canvas.toDataURL('image/png') as BinaryFileData['dataURL']
 }
 
-export async function renderReferenceImages(references: Record<string, LocalContent>, assetRoot: string) {
+export async function renderReferenceImages(references: Record<string, LocalContent>, pdfs: Record<string, string>, assetRoot: string, signal?: AbortSignal) {
   const missing: string[] = []
-  const files = Object.fromEntries((await Promise.all(Object.entries(references).map(async ([id, content]) => {
+  const files: Record<string, BinaryFileData> = Object.create(null)
+  for (const [id, content] of Object.entries(references)) {
+    if (signal?.aborted) break
     try {
-      const file: BinaryFileData = {
-        id: id as BinaryFileData['id'], mimeType: 'image/png', dataURL: await referenceArtwork(content, assetRoot), created: 0,
+      files[id] = {
+        id: id as BinaryFileData['id'], mimeType: 'image/png', dataURL: await referenceArtwork(content, pdfs, assetRoot, signal), created: 0,
       }
-      return [[id, file]]
     } catch (error) {
+      if (signal?.aborted) break
       console.error('Could not render local drawing attachment:', error)
       missing.push(id)
-      return []
     }
-  }))).flat())
+  }
   return { files, missing }
 }

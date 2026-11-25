@@ -7,7 +7,7 @@ type LocalTarget =
 
 export type LocalContent =
   | { kind: 'note'; html: string }
-  | { kind: 'pdf'; bytes: string; page: number; rect?: Rect }
+  | { kind: 'pdf'; file: string; page: number; rect?: Rect }
 
 export function localReference(raw: string, wiki = false): LocalTarget | undefined {
   const text = wiki ? /^\[\[([^\]\r\n]+)\]\]$/.exec(raw)?.[1] : raw
@@ -50,7 +50,7 @@ export function notePreview(source: string, fragment: string) {
       if (!paragraph?.map) return
       selected = lines.slice(...paragraph.map).map(line => line.replace(marker, '')).join('\n')
       if (!selected.trim()) {
-        const previous = tokens.filter(token => token.map && token.map[1] <= paragraph.map![0]).at(-1)
+        const previous = tokens.filter(token => token.level === 0 && token.map && token.map[1] <= paragraph.map![0]).at(-1)
         if (!previous?.map) return
         selected = lines.slice(...previous.map).join('\n')
       }

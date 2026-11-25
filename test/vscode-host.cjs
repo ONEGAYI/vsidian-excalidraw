@@ -59,7 +59,7 @@ exports.run = async () => {
       data = { source: document.getText(), dirty: document.isDirty, version: document.version }
     }
     const active = vscode.window.tabGroups.activeTabGroup.activeTab?.input
-    data = { ...data, active: active?.viewType }
+    data = { ...data, active: active?.viewType, activePath: active?.uri?.fsPath }
     const response = path.join(session, prefix + '-res-' + id)
     await fs.writeFile(response + '.tmp', JSON.stringify(data))
     await fs.rename(response + '.tmp', response)

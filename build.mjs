@@ -1,6 +1,7 @@
 import { cp, mkdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { build } from 'esbuild'
+import { createSdkBridgePlugin } from './sdkBridge.mjs'
 
 await build({
   entryPoints: ['src/extension.ts'], outfile: 'dist/extension.cjs', external: ['vscode'],
@@ -32,6 +33,7 @@ await build({
 await build({
   entryPoints: ['src/preview.ts'], outfile: 'dist/preview.js',
   bundle: true, platform: 'browser', format: 'iife', target: 'chrome114', minify: true,
+  plugins: [createSdkBridgePlugin()],
   legalComments: 'linked',
 })
 if (!fontFallbackRemoved) throw new Error('The bundled Excalidraw font source changed; check the offline font path')
