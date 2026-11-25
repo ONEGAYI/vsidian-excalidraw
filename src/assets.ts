@@ -95,8 +95,12 @@ export async function readAssets(uri: Uri, scene: Scene, attachments: Map<string
           return { kind: 'pdf' as const, file: file.path, page: target.page, rect: target.rect }
         }
         if ((await workspace.fs.stat(file)).size > 1024 * 1024) return null
-        const source = (await workspace.openTextDocument(file)).getText()
-        const preview = notePreview(source, target.fragment)
+        const document = await workspace.openTextDocument(file).then(opened => opened, error => {
+          report(error)
+          return null
+        })
+        if (!document) return null
+        const preview = notePreview(document.getText(), target.fragment)
         return preview ? { kind: 'note' as const, ...preview } : null
       } catch (error) {
         if (!(error instanceof FileSystemError)) throw error

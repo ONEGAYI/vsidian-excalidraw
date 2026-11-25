@@ -31,6 +31,15 @@ exports.run = async () => {
     let data
     if (input.action === 'default') {
       await vscode.commands.executeCommand('vscode.open', uri)
+    } else if (input.action === 'source-beside') {
+      const document = await vscode.workspace.openTextDocument(uri)
+      await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Beside, preview: false })
+    } else if (input.action === 'reopen-with') {
+      void vscode.commands.executeCommand('workbench.action.reopenWithEditor')
+    } else if (input.action === 'group-views') {
+      data = { views: vscode.window.tabGroups.all.map(group => group.activeTab?.input?.viewType) }
+    } else if (input.action === 'close-left-group') {
+      assert(await vscode.window.tabGroups.close(vscode.window.tabGroups.all[0]))
     } else if (input.action === 'markdown') {
       await vscode.commands.executeCommand('vscode.openWith', uri, 'onegayi.vsidian.editor', { preview: false })
     } else if (input.action === 'board') {

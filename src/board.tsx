@@ -38,6 +38,7 @@ let initial: ExcalidrawInitialDataState
 let viewed = false
 let importFlight = Promise.resolve()
 let imageNotice: string | undefined
+const queuedImports: { files: BinaryFileData[]; elements: ReturnType<typeof convertToExcalidrawElements> }[] = []
 const pendingImages = new Map<string, ImportedImage>()
 let incomingState: AbortController | undefined
 let pdfCards: Awaited<ReturnType<typeof renderReferenceImages>>['files'] = {}
@@ -56,6 +57,7 @@ function request(command: { kind: 'patch'; version: number; patch: ReturnType<ty
 
 function hasChanges() {
   if (!editing || !api || !baseline) return false
+  if (queuedImports.length) return true
   const patch = diff(baseline, capture())
   return !!(patch.elements.length || patch.order)
 }
@@ -76,10 +78,24 @@ function flush(): Promise<boolean> {
   if (!hasChanges()) return Promise.resolve(true)
   flight = (async () => {
     while (enabled && baseline && editing && api && !issue && !pressed && !api.getAppState().editingTextElement) {
-      const elements = capture()
-      const patch = diff(baseline, elements)
-      if (!patch.elements.length && !patch.order) break
+      let elements = capture()
+      let patch = diff(baseline, elements)
       if (!validateText(patch)) break
+      if (!patch.elements.length && !patch.order) {
+        // Admit one paste/drop only after the previous document edit was acknowledged.
+        // The image elements and their files must share a single WorkspaceEdit.
+        const batch = queuedImports.shift()
+        if (!batch) break
+        for (const data of batch.files) pendingImages.set(data.id, data)
+        api.addFiles(batch.files)
+        api.updateScene({
+          elements: [...api.getSceneElementsIncludingDeleted(), ...batch.elements],
+          appState: { selectedElementIds: Object.fromEntries(batch.elements.map(element => [element.id, true])) },
+          captureUpdate: CaptureUpdateAction.NEVER,
+        })
+        elements = capture()
+        patch = diff(baseline, elements)
+      }
       const fileIds = new Set(patch.elements.flatMap(({ fields }) => fields.fileId && !fields.isDeleted ? [fields.fileId] : []))
       const images = [...pendingImages.values()].filter(image => fileIds.has(image.id))
       const result = await request({ kind: 'patch', version: revision, patch, ...(images.length ? { images } : {}) })
@@ -157,6 +173,7 @@ function install(scene: Scene, sourceLinks?: Readonly<Record<string, string>>) {
   api = undefined
   baseline = undefined
   diff = createSceneDiff(scene.elements.map(element => element.id))
+  queuedImports.length = 0
   pendingImages.clear()
   imageNotice = undefined
   mount++
@@ -196,13 +213,9 @@ function importImages(files: File[], point: { clientX: number; clientY: number }
       }
     }))
     if (!enabled || !editing || api !== editor || issue) return
-    const added = convertToExcalidrawElements(bitmaps.map(bitmap => bitmap.shape))
-    for (const { data } of bitmaps) pendingImages.set(data.id, data)
-    editor.addFiles(bitmaps.map(bitmap => bitmap.data))
-    editor.updateScene({
-      elements: [...editor.getSceneElementsIncludingDeleted(), ...added],
-      appState: { selectedElementIds: Object.fromEntries(added.map(element => [element.id, true])) },
-      captureUpdate: CaptureUpdateAction.NEVER,
+    queuedImports.push({
+      files: bitmaps.map(bitmap => bitmap.data),
+      elements: convertToExcalidrawElements(bitmaps.map(bitmap => bitmap.shape)),
     })
     schedule()
   }).catch(error => {

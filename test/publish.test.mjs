@@ -3,11 +3,11 @@ import { registerHooks } from 'node:module'
 import { test } from 'node:test'
 import { setImmediate as turn } from 'node:timers/promises'
 
-test('画板只读取最新待发版本，停用不等附件读取完毕', async () => {
+test('画板只读取最新待发版本，停用不等附件读取完毕，并准确报告图片拒绝', async () => {
   const mock = 'data:text/javascript,' + encodeURIComponent(`
     import { posix } from 'node:path'
     const subscription = { dispose() {} }
-    export const io = { reads: 0, pending: Promise.resolve() }
+    export const io = { reads: 0, pending: Promise.resolve(), errors: [] }
     export const callbacks = { changes: [] }
     export class FileSystemError extends Error {}
     export class RelativePattern {}
@@ -31,12 +31,12 @@ test('画板只读取最新待发版本，停用不等附件读取完毕', async
       },
     }) }) }
     export const window = {
-      createOutputChannel: () => ({ appendLine: message => { throw new Error(message) } }),
+      createOutputChannel: () => ({ appendLine: message => io.errors.push(message) }),
       registerCustomEditorProvider(view, provider) {
         callbacks.open = provider.resolveCustomTextEditor
         return subscription
       },
-      tabGroups: { activeTabGroup: {}, onDidChangeTabs: () => subscription, onDidChangeTabGroups: () => subscription },
+      tabGroups: { all: [], activeTabGroup: {}, onDidChangeTabs: () => subscription, onDidChangeTabGroups: () => subscription },
     }
     export const workspace = {
       onDidOpenTextDocument: () => subscription, onDidSaveTextDocument: () => subscription,
@@ -61,11 +61,13 @@ test('画板只读取最新待发版本，停用不等附件读取完毕', async
       getText: () => ['---', 'excalidraw-plugin: parsed', '---', '# Excalidraw Data', '## Embedded Files',
         'page: [[pages.pdf#page=2]]', '## Drawing', '```json', JSON.stringify(scene), '```'].join('\n') }
     const states = []
+    const results = []
     let receive
     await callbacks.open(document, {
       webview: {
         cspSource: 'test', asWebviewUri: uri => uri.path, postMessage: async message => {
           if (message.kind === 'state') states.push([message.version, message.force, message.enabled])
+          if (message.kind === 'result') results.push(message)
           return true
         },
         onDidReceiveMessage: callback => { receive = callback; return { dispose() {} } },
@@ -103,6 +105,15 @@ test('画板只读取最新待发版本，停用不等附件读取完毕', async
     await turn()
     assert.equal(io.reads, 4)
     assert.deepEqual(states, [[4, true, true], [5, false, false], [5, false, true]])
+    assert.deepEqual(io.errors, [])
+
+    const id = '0'.repeat(32)
+    receive({ kind: 'patch', id: 1, version: 5, images: [{ id, dataURL: '' }],
+      patch: { elements: [{ id: 'IMAGE001', fields: { type: 'image', fileId: id } }] } })
+    await turn()
+    assert.deepEqual(results, [{ kind: 'result', id: 1, version: 5, reason: 'imageRejected' }])
+    assert.equal(io.errors.length, 1)
+    assert.match(io.errors[0], /^Error: invalid-image-import/)
   } finally {
     hooks.deregister()
   }

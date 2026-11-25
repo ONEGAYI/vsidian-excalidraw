@@ -65,6 +65,18 @@ export function isDrawing(source: string): boolean {
   return metadata.errors.length === 0 && Boolean(metadata.get('excalidraw-plugin'))
 }
 
+class DrawingFormatError extends Error {}
+
+export function isReadableDrawing(source: string): boolean {
+  try {
+    readDrawing(source)
+    return true
+  } catch (error) {
+    if (error instanceof DrawingFormatError || error instanceof SyntaxError) return false
+    throw error
+  }
+}
+
 function textRecords(source: string, { from, to }: Span): Map<string, RecordSpan> {
   const records = new Map<string, RecordSpan>()
   const body = source.slice(from, to)
@@ -99,7 +111,7 @@ function readSections(source: string, start: number, end: number, elements: Elem
   const sections: DataSections = {}
   for (const [index, heading] of headings.entries()) {
     const key = heading[1] === 'Embedded files' ? 'Embedded Files' : heading[1] as keyof DataSections
-    if (sections[key]) throw new Error('ambiguous-drawing-sections')
+    if (sections[key]) throw new DrawingFormatError('ambiguous-drawing-sections')
     const from = start + heading.index + heading[0].length
     const next = headings[index + 1]
     let to = next ? start + next.index : end
@@ -109,7 +121,7 @@ function readSections(source: string, start: number, end: number, elements: Elem
     if (key === 'Text Elements' && next) {
       const all = textRecords(source, { from, to: end })
       if (elements.some(element => element?.type === 'text' && (all.get(element.id)?.to ?? 0) > to)) {
-        throw new Error('ambiguous-drawing-sections')
+        throw new DrawingFormatError('ambiguous-drawing-sections')
       }
     }
     sections[key] = { ...span, records: key === 'Text Elements' ? textRecords(source, span) : keyedRecords(source, span) }
@@ -118,7 +130,7 @@ function readSections(source: string, start: number, end: number, elements: Elem
 }
 
 export function readDrawing(source: string) {
-  if (!isDrawing(source)) throw new Error('not-drawing')
+  if (!isDrawing(source)) throw new DrawingFormatError('not-drawing')
   const bodyStart = FRONTMATTER.exec(source)![0].length
   const headings = unfencedHeadings(source, bodyStart)
   const drawing = new RegExp(DRAWING)
@@ -129,18 +141,18 @@ export function readDrawing(source: string) {
     const block = drawing.exec(source)
     if (block) blocks.push(block)
   }
-  if (blocks.length !== 1) throw new Error('drawing-section')
+  if (blocks.length !== 1) throw new DrawingFormatError('drawing-section')
   const block = blocks[0]
   const kind = block[1] as 'json' | 'compressed-json'
   const json = kind === 'json' ? block[2] : lz.decompressFromBase64(block[2].replace(/\s/g, ''))
   const stored = JSON.parse(json || 'null') as Scene | null
   if (!stored || stored.type !== 'excalidraw' || typeof stored.version !== 'number' || !Array.isArray(stored.elements)) {
-    throw new Error('invalid-scene')
+    throw new DrawingFormatError('invalid-scene')
   }
   const header = [...headings].filter(([index, heading]) => index < block.index && heading === 'Excalidraw Data').at(-1)?.[0]
   const sections = readSections(source, header ?? bodyStart, block.index, stored.elements, headings)
   const elements = stored.elements.map(element => {
-    if (!element || typeof element.id !== 'string' || typeof element.type !== 'string') throw new Error('invalid-element')
+    if (!element || typeof element.id !== 'string' || typeof element.type !== 'string') throw new DrawingFormatError('invalid-element')
     const text = sections['Text Elements']?.records.get(element.id)?.value
     const link = sections['Element Links']?.records.get(element.id)?.value
     const rawText = element.type === 'text' ? text ?? (typeof element.rawText === 'string' ? element.rawText : undefined) : undefined

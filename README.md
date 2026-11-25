@@ -113,6 +113,7 @@ node test/native.mjs <阶段> out/roundtrip <Vsidian源码目录> <Code.exe> <Vs
 
 * 依次运行 `seed`（Obsidian 生成 `json` 与 `compressed-json` 两种图档）、`vscode`（Vsidian 阅读、绘制、撤销、切换与保存）、`reopen`（Obsidian 重开校验），以及 `create`、`new`（Vsidian 新建图档、Obsidian 重开校验）。
 * 图片导入验收：同一测试目录依次跑 `seed`、`image-import`、`image-reopen`、`image-return`，覆盖粘贴、拖入、撤销与重做，以及两端保存后重开。
+  另用独立测试目录跑 `image-batches`，验证宿主回执未到时，两次导入仍能分别保存和撤销，单次 8 MiB 上限不变。
 * 笔记内预览验收：在上述图片测试目录接着跑 `preview-vscode`、`preview-obsidian`，覆盖两种图档格式、普通笔记嵌入、预览点击和源文保真。
 * 画板内资料验收：依次跑 `references-seed`、`references-vscode`、`references-obsidian`，用官方 Obsidian 插件创建带笔记标题、块和 PDF 页码引用的图档，再双端重开验证。
 * 网页验收：依次跑 `web-seed`、`web-vscode`、`web-obsidian`，验证默认不联网、HTTPS 预览需点击、加载被拦时保留浏览器入口、设置撤销及原始引用保真；测试域名全部由宿主测试拦截。

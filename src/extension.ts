@@ -5,7 +5,7 @@ import {
   type Disposable, type ExtensionContext, type Tab, type TextDocument, type ViewColumn, type WebviewPanel,
 } from 'vscode'
 import { localResource, readAssets, stageImportedImages } from './assets.ts'
-import { isDrawing, newDrawing, readDrawing, writeDrawing } from './format.ts'
+import { isDrawing, isReadableDrawing, newDrawing, readDrawing, writeDrawing } from './format.ts'
 import { localReference } from './references.ts'
 import type { Message, Request } from './protocol.ts'
 import { strings } from './strings.ts'
@@ -39,7 +39,7 @@ export async function activate(context: ExtensionContext) {
   let webOrigins: string[] = []
   const boards = new Set<() => void>()
   const webPolicies = new Set<() => void>()
-  const examinedTabs = new WeakSet<Tab>()
+  const examinedFiles = new Set<string>()
   const openingMarkdown = new Set<string>()
   const output = window.createOutputChannel('Vsidian Excalidraw')
   const report = (error: unknown) => output.appendLine(error instanceof Error ? error.stack ?? error.message : String(error))
@@ -58,7 +58,7 @@ export async function activate(context: ExtensionContext) {
       await commands.executeCommand('vscode.openWith', uri, MARKDOWN, { viewColumn, preview: false })
       const tab = window.tabGroups.all.find(group => group.viewColumn === viewColumn)?.activeTab
       if (tab?.input instanceof TabInputCustom && tab.input.viewType === MARKDOWN
-        && tab.input.uri.toString() === uri.toString()) examinedTabs.add(tab)
+        && tab.input.uri.toString() === uri.toString()) examinedFiles.add(uri.toString())
     } finally {
       openingMarkdown.delete(key)
     }
@@ -83,21 +83,22 @@ export async function activate(context: ExtensionContext) {
     const doc = uri && workspace.textDocuments.find(item => item.uri.toString() === uri.toString())
     const drawing = enabled && !!doc && isDrawing(doc.getText())
     void commands.executeCommand('setContext', 'vsidianExcalidraw.canOpen', drawing)
-    return { tab, doc, drawing }
+    return { tab, uri, doc, drawing }
   }
 
   function syncTab() {
-    const { tab, doc, drawing } = syncTitle()
-    if (!enabled || !doc || !(tab?.input instanceof TabInputCustom) || tab.input.viewType !== MARKDOWN || examinedTabs.has(tab)) return
-    // Check each tab on first activation, not while the user edits its frontmatter.
-    examinedTabs.add(tab)
-    if (!drawing || openingMarkdown.has(markdownKey(doc.uri, tab.group.viewColumn))) return
-    try {
-      readDrawing(doc.getText())
-    } catch (error) {
-      report(error)
-      return
+    const { tab, uri, doc, drawing } = syncTitle()
+    const openFiles = new Set(window.tabGroups.all.flatMap(group => group.tabs.map(tab => tabUri(tab)?.toString())))
+    for (const key of examinedFiles) {
+      if (!openFiles.has(key)) examinedFiles.delete(key)
     }
+    if (!tab || !uri || examinedFiles.has(uri.toString())) return
+    const markdown = tab.input instanceof TabInputCustom && tab.input.viewType === MARKDOWN
+    if (markdown && enabled && !doc) return
+    // Apply the default once while this file is open; tab wrappers change when groups are rebuilt.
+    examinedFiles.add(uri.toString())
+    if (!markdown || !doc || !drawing || openingMarkdown.has(markdownKey(uri, tab.group.viewColumn))) return
+    if (!isReadableDrawing(doc.getText())) return
     void openBoard(doc, tab).catch(report)
   }
 
@@ -264,7 +265,8 @@ export async function activate(context: ExtensionContext) {
         }).catch(async error => {
           report(error)
           if ('id' in msg) {
-            const reason = error instanceof Error && error.message === 'reserved-text' ? 'reservedText' : 'deleted'
+            const code = error instanceof Error && error.message
+            const reason = code === 'reserved-text' ? 'reservedText' : code === 'invalid-image-import' ? 'imageRejected' : 'deleted'
             await post({ kind: 'result', id: msg.id, version: document.version, reason })
           }
         })

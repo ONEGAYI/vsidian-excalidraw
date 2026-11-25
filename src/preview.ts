@@ -1,5 +1,5 @@
 import { defineAddonPage } from 'vsidian-addon-sdk'
-import { isDrawing, type Scene } from './format.ts'
+import { isReadableDrawing, type Scene } from './format.ts'
 import { strings } from './strings.ts'
 import type { LocalReferences } from './protocol.ts'
 
@@ -29,7 +29,7 @@ function mountPage(sdk: PageSdk) {
     if (!outcome.ok && outcome.reason !== 'released') throw new Error('Could not open the Excalidraw drawing: ' + outcome.reason)
   }
   register({
-    matches: target => isDrawing(target.text),
+    matches: target => isReadableDrawing(target.text),
     async mount(container, target, signal) {
       const words = strings(sdk.locale?.get() || document.documentElement.lang)
       container.textContent = words.loading

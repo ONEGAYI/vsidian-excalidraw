@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -25,9 +25,14 @@ const invariant = 'Original note content — 画板往返'
 const asset = 'assets/reference.svg'
 const gallery = 'Gallery.md'
 const gallerySource = '# Drawing gallery\n\n![[Compressed.excalidraw]]\n\n![[Plain]]\n\n![[Readme]]\n'
+const incomplete = 'Incomplete.excalidraw.md'
+const incompleteHeading = 'A drawing without scene data'
+const incompleteSource = '---\nexcalidraw-plugin: parsed\n---\n\n# ' + incompleteHeading + '\n'
+const incompleteGallery = 'Incomplete reference.md'
 const localBoard = 'Local references.excalidraw.md'
 const localNote = 'Reference.md'
 const localPdf = 'assets/pages.pdf'
+const slowImageBoard = 'Slow image writes.excalidraw.md'
 const sectionMarker = 'Northern section marker'
 const blockMarker = 'Portable block marker'
 const referencesNote = '# Remote section\n\nDo not show this section\n\n## Selected section\n\n**' + sectionMarker +
@@ -257,19 +262,24 @@ if (stage === 'seed') {
   assert(contents.stored.elements.some(e => e.type === 'iframe' && e.customData.generationData.html.includes('RAW_FRAME_CONTENT')))
   await writeFile(path.join(session, webBoard + '.web-original'), source)
   console.log('PASS: Obsidian created actual URL elements and an HTML frame in a plain graph')
-} else if (['vscode', 'create', 'image-import', 'image-return', 'preview-vscode', 'references-vscode', 'web-vscode'].includes(stage)) {
+} else if (['vscode', 'view-selection-vscode', 'create', 'image-import', 'image-batches', 'image-return', 'preview-vscode', 'references-vscode', 'web-vscode'].includes(stage)) {
+  if (stage === 'image-batches') {
+    await mkdir(vault, { recursive: true })
+    await writeFile(path.join(vault, slowImageBoard), newDrawing())
+  }
   if (stage === 'preview-vscode') await writeFile(path.join(vault, gallery), gallerySource)
   if (stage === 'preview-vscode') {
     for (const file of cases) await cp(path.join(session, file + '.with-import'), path.join(vault, file))
     const formats = await Promise.all(cases.map(async file => readDrawing(await readFile(path.join(vault, file), 'utf8')).payload.kind))
     assert.deepEqual(formats, ['compressed-json', 'json'], 'A two-format preview test requires one drawing of each encoding')
+    await writeFile(path.join(vault, incompleteGallery), '# Reference fallback\n\n![[Incomplete.excalidraw]]\n')
   }
-  if (stage === 'vscode' || stage === 'image-import') {
+  if (['vscode', 'view-selection-vscode', 'image-import'].includes(stage)) {
     for (const file of cases) await cp(path.join(session, file + '.original'), path.join(vault, file))
   }
+  if (stage === 'vscode' || stage === 'preview-vscode') await writeFile(path.join(vault, incomplete), incompleteSource)
   if (stage === 'vscode') {
     await writeFile(path.join(vault, 'Tagged.excalidraw.md'), '---\ntags: [excalidraw]\n---\n\n# A note about Excalidraw\n')
-    await writeFile(path.join(vault, 'Incomplete.excalidraw.md'), '---\nexcalidraw-plugin: parsed\n---\n\n# A drawing without scene data\n')
   }
   const scope = path.join(session, stage + '-user')
   await mkdir(path.join(scope, 'User'), { recursive: true })
@@ -485,6 +495,38 @@ async function vscodeFlow(page) {
   const markdownView = 'onegayi.vsidian.editor'
   const boardView = 'onegayi.vsidian-excalidraw.board'
 
+  if (stage === 'view-selection-vscode') {
+    const file = cases[1]
+    await command('default', file)
+    await hasView(boardView, file)
+    const originalBoard = await frameWith('.board-toolbar')
+    await retry(() => originalBoard.evaluate(readPaint), 'The default view did not paint the drawing')
+    await command('source-beside', file)
+    await page.getByRole('button', { name: /Switch Vsidian to live preview/i }).click({ timeout: 5000 })
+    await hasView(markdownView, file)
+    const markdown = await frameWith('.cm-content')
+    await markdown.getByText(invariant, { exact: true }).first().waitFor({ state: 'visible', timeout: 5000 })
+    await hasView(markdownView, file)
+    assert.deepEqual((await command('group-views')).views, [boardView, markdownView])
+    await page.getByRole('button', { name: /Open in Excalidraw Board/ }).click({ timeout: 5000 })
+    await hasView(boardView, file)
+    await command('reopen-with')
+    await page.locator('.quick-input-widget').getByLabel('Vsidian', { exact: true }).click({ timeout: 5000 })
+    await hasView(markdownView, file)
+    await (await frameWith('.cm-content')).getByText(invariant, { exact: true }).first().waitFor({ state: 'visible', timeout: 5000 })
+    assert.deepEqual((await command('group-views')).views, [boardView, markdownView])
+    await command('close-left-group')
+    await hasView(markdownView, file)
+    await (await frameWith('.cm-content')).getByText(invariant, { exact: true }).first().waitFor({ state: 'visible', timeout: 5000 })
+    assert.deepEqual((await command('group-views')).views, [markdownView])
+    await command('close-active')
+    await command('default', file)
+    await hasView(boardView, file)
+    await command('stop')
+    console.log('PASS: both explicit Markdown entries leave the other group on its board')
+    return
+  }
+
   if (stage === 'web-vscode') {
     const original = await readFile(path.join(session, webBoard + '.web-original'), 'utf8')
     await writeFile(path.join(vault, webBoard), original)
@@ -649,10 +691,27 @@ async function vscodeFlow(page) {
 
   if (stage === 'preview-vscode') {
     page.on('requestfailed', req => console.error('[preview resource]', req.failure()?.errorText, req.url().slice(0, 420)))
+    const selectLive = async frame => {
+      const toLive = frame.getByRole('button', { name: 'Switch to live preview', exact: true })
+      if (await toLive.isVisible()) await toLive.click({ timeout: 5000 })
+      await frame.getByRole('button', { name: 'Switch to reading view', exact: true }).waitFor({ state: 'visible', timeout: 5000 })
+    }
+    await command('markdown', incompleteGallery)
+    await hasView(markdownView, incompleteGallery)
+    const fallback = await frameWith('.vsidian-view-toggle')
+    await selectLive(fallback)
+    const ordinaryContent = fallback.locator('.vsidian-embed-card').getByText(incompleteHeading).filter({ visible: true })
+    await ordinaryContent.first().waitFor({ state: 'visible', timeout: 5000 })
+    await fallback.getByRole('button', { name: 'Switch to reading view', exact: true }).click()
+    await fallback.locator('.vsidian-view-reading .vsidian-embed-card').getByText(incompleteHeading, { exact: true })
+      .filter({ visible: true }).waitFor({ state: 'visible', timeout: 5000 })
+    assert.equal((await command('snapshot', incomplete)).source, incompleteSource)
+    console.log('PASS: an incomplete drawing is rendered as Markdown in Live and Reading')
     const sources = await Promise.all(cases.map(name => readFile(path.join(vault, name), 'utf8')))
     await command('markdown', gallery)
     await hasView(markdownView, gallery)
     const frame = await frameWith('.vsidian-view-toggle')
+    await selectLive(frame)
     for (const [i, mode] of ['Live', 'Reading'].entries()) {
       const toggle = frame.getByRole('button', { name: i === 0 ? 'Switch to reading view' : 'Switch to live preview', exact: true })
       const draws = frame.locator('.vsidian-embed-card img[data-excalidraw-preview]:visible')
@@ -702,6 +761,118 @@ async function vscodeFlow(page) {
 
   if (stage === 'create') {
     await createFlow(page, command, frameWith, hasView)
+    await command('stop')
+    return
+  }
+
+  if (stage === 'image-batches') {
+    const file = slowImageBoard
+    const bytes = 5 * 1024 * 1024
+    await command('board', file)
+    await hasView(boardView, file)
+    const frame = await frameWith('.board-toolbar')
+    const button = name => frame.locator('.board-toolbar').getByRole('button', { name, exact: true })
+    await button('Edit drawing').click()
+    await frame.evaluate(async size => {
+      const swatch = document.createElement('canvas')
+      swatch.width = 64
+      swatch.height = 48
+      const ctx = swatch.getContext('2d')
+      const files = []
+      for (const color of ['#19ba50', '#2266cc']) {
+        ctx.fillStyle = color
+        ctx.fillRect(0, 0, swatch.width, swatch.height)
+        const png = await new Promise(resolve => swatch.toBlob(resolve, 'image/png'))
+        // Pad after IEND to control the transport size without expensive pixel decoding.
+        files.push(new File([png, new Uint8Array(size - png.size)], color + '.png', { type: 'image/png' }))
+      }
+      const decoded = new Set()
+      const decode = Image.prototype.decode
+      Image.prototype.decode = async function () {
+        await decode.call(this)
+        if (this.src.startsWith('data:image/png;base64,') && this.src.length > size) decoded.add(this.src.slice(0, 512))
+      }
+      const state = window.imageBatches = {
+        decoded, failures: [],
+        send(method, ...indexes) {
+          const transfer = new DataTransfer()
+          for (const index of indexes) transfer.items.add(files[index])
+          const canvas = document.querySelector('.excalidraw canvas.interactive')
+          const box = canvas.getBoundingClientRect()
+          const options = { bubbles: true, cancelable: true }
+          canvas.dispatchEvent(method === 'paste'
+            ? new ClipboardEvent('paste', { ...options, clipboardData: transfer })
+            : new DragEvent('drop', { ...options, dataTransfer: transfer, clientX: box.left + 150, clientY: box.top + 290 }))
+        },
+        release() {
+          Image.prototype.decode = decode
+          state.released = true
+          state.held()
+        },
+      }
+      // Delay the real result at the outer webview's delivery boundary.
+      const post = window.postMessage
+      window.postMessage = function (data, ...args) {
+        if (data?.kind === 'result') {
+          if (data.reason) state.failures.push(data.reason)
+          if (!state.released && data.id === 1) {
+            state.held = () => post.call(this, data, ...args)
+            return
+          }
+        }
+        post.call(this, data, ...args)
+      }
+    }, bytes)
+    const box = await frame.locator('canvas.interactive').boundingBox()
+    assert(box)
+    await page.mouse.click(box.x + 150, box.y + 220)
+    await page.keyboard.press('r')
+    await page.mouse.move(box.x + 150, box.y + 220)
+    await page.mouse.down()
+    await page.mouse.move(box.x + 205, box.y + 265, { steps: 4 })
+    await page.mouse.up()
+    await frame.waitForFunction(() => typeof window.imageBatches.held === 'function', undefined, { timeout: 6000 })
+    const drawing = async () => readDrawing((await command('snapshot', file)).source)
+    const liveImages = current => current.scene.elements.filter(el => el.type === 'image' && !el.isDeleted).map(el => el.fileId)
+    assert((await drawing()).scene.elements.some(el => el.type === 'rectangle' && !el.isDeleted))
+
+    await frame.evaluate(() => window.imageBatches.send('paste', 0, 1))
+    await frame.getByText('up to 8 MiB at a time', { exact: false }).waitFor({ state: 'visible' })
+    await frame.evaluate(() => {
+      window.imageBatches.send('paste', 0)
+      window.imageBatches.send('drop', 1)
+    })
+    await frame.waitForFunction(() => window.imageBatches.decoded.size === 2)
+    assert.deepEqual(liveImages(await drawing()), [], 'The ordinary write must still be in flight on the board')
+    await frame.evaluate(() => window.imageBatches.release())
+    const imported = await retry(async () => {
+      const reasons = await frame.evaluate(() => window.imageBatches.failures)
+      assert.deepEqual(reasons, [], 'Two allowed imports were rejected while the first write was pending')
+      const current = await drawing()
+      return liveImages(current).length === 2 && current
+    }, 'The two 5 MiB imports did not both reach the document')
+    const ids = liveImages(imported)
+    const targets = ids.map(id => path.join(vault, imported.attachments.get(id)))
+    const check = (count, reason) => retry(async () => {
+      const current = await drawing()
+      assert(current.scene.elements.some(el => el.type === 'rectangle' && !el.isDeleted), 'Undo changed the earlier rectangle')
+      const lengths = await Promise.all(targets.map(target => stat(target).then(file => file.size, error => {
+        if (error.code === 'ENOENT') return 0
+        throw error
+      })))
+      return JSON.stringify(liveImages(current)) === JSON.stringify(ids.slice(0, count))
+        && current.attachments.size === count && ids.slice(0, count).every(id => current.attachments.has(id))
+        && lengths.every((size, i) => size === (i < count ? bytes : 0))
+    }, reason)
+    await check(2, 'Both image elements and their full-size attachments must be written')
+    for (const [action, count] of [['Undo', 1], ['Undo', 0], ['Redo', 1], ['Redo', 2]]) {
+      await button(action).click()
+      await check(count, action + ' must change exactly one import and its attachment')
+    }
+    await button('Save').click()
+    await retry(async () => readDrawing(await readFile(path.join(vault, file), 'utf8')).attachments.size === 2,
+      'Saving did not persist both imported images')
+    console.log('PASS: two 5 MiB imports behind a held write each save, undo and redo; a single 10 MiB paste is rejected')
     await command('stop')
     return
   }
@@ -788,7 +959,7 @@ async function vscodeFlow(page) {
   }
 
   for (const [file, heading] of [['Tagged.excalidraw.md', 'A note about Excalidraw'],
-    ['Incomplete.excalidraw.md', 'A drawing without scene data']]) {
+    [incomplete, incompleteHeading]]) {
     await command('default', file)
     await hasView(markdownView, file)
     const frame = await frameWith('.cm-content, .markdown-preview-view')
