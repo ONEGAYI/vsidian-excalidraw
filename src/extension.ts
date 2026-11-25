@@ -6,6 +6,7 @@ import {
 } from 'vscode'
 import { localResource, readAssets, stageImportedImages } from './assets.ts'
 import { isDrawing, newDrawing, readDrawing, writeDrawing } from './format.ts'
+import { localReference } from './references.ts'
 import type { Message, Request } from './protocol.ts'
 import { strings } from './strings.ts'
 
@@ -73,6 +74,7 @@ export async function activate(context: ExtensionContext) {
           const assets = await readAssets(document.uri, drawing.scene, drawing.attachments, report)
           state.scene = { ...drawing.scene, files: assets.files }
           state.missing = assets.missing
+          state.references = assets.references
         } catch (error) {
           report(error)
         }
@@ -102,11 +104,11 @@ export async function activate(context: ExtensionContext) {
           if (/^https?:\/\//i.test(msg.link)) {
             await env.openExternal(Uri.parse(msg.link, true))
           } else {
-            const wikilink = /^\[\[([^#|\]]+)(?:[#|][^\]]*)?\]\]$/.exec(msg.link)
-            if (wikilink) {
-              const path = wikilink[1]
-              const found = await localResource(document.uri, /\.md$/i.test(path) ? path : path + '.md')
-              if (found) await commands.executeCommand('vscode.openWith', found, MARKDOWN)
+            const target = localReference(msg.link, true)
+            if (target) {
+              const found = await localResource(document.uri, target.path)
+              if (found && target.kind === 'note') await commands.executeCommand('vscode.openWith', found, MARKDOWN)
+              if (found && target.kind === 'pdf') await commands.executeCommand('vscode.open', found.with({ fragment: target.fragment }))
             }
           }
           return
@@ -207,7 +209,7 @@ export async function activate(context: ExtensionContext) {
           try {
             const drawing = readDrawing(payload.text)
             const assets = await readAssets(uri, drawing.scene, drawing.attachments, report)
-            return { ...drawing.scene, files: assets.files }
+            return { scene: { ...drawing.scene, files: assets.files }, imageReferences: assets.references.images }
           } catch (error) {
             report(error)
             return null

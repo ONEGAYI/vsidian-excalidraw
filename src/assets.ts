@@ -1,7 +1,8 @@
 import { basename, extname, posix } from 'node:path'
 import { FileSystemError, RelativePattern, Uri, workspace } from 'vscode'
 import type { DrawingPatch, Scene } from './format.ts'
-import { imageImportLimit, importedImageTypes, type ImportedImage } from './protocol.ts'
+import { imageImportLimit, importedImageTypes, type ImportedImage, type LocalReferences } from './protocol.ts'
+import { localReference, notePreview, type LocalContent } from './references.ts'
 
 const mimeTypes = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -54,11 +55,53 @@ export async function localResource(source: Uri, target: string): Promise<Uri | 
 export async function readAssets(uri: Uri, scene: Scene, attachments: Map<string, string>, report: (error: unknown) => void) {
   const files = { ...scene.files }
   const missing: string[] = []
+  const references: LocalReferences = { cards: Object.create(null), images: Object.create(null) }
+  const cached = new Map<string, Promise<LocalContent | null>>()
+  function load(target: NonNullable<ReturnType<typeof localReference>>) {
+    const key = target.path + '#' + target.fragment
+    const existing = cached.get(key)
+    if (existing) return existing
+    const result = (async () => {
+      try {
+        const file = await localResource(uri, target.path)
+        if (!file) return null
+        const stat = await workspace.fs.stat(file)
+        if (stat.size > (target.kind === 'pdf' ? 32 * 1024 * 1024 : 1024 * 1024)) return null
+        if (target.kind === 'pdf') {
+          const bytes = await workspace.fs.readFile(file)
+          return { kind: 'pdf' as const, bytes: Buffer.from(bytes).toString('base64'), page: target.page, rect: target.rect }
+        }
+        const source = (await workspace.openTextDocument(file)).getText()
+        const preview = notePreview(source, target.fragment)
+        return preview ? { kind: 'note' as const, ...preview } : null
+      } catch (error) {
+        if (!(error instanceof FileSystemError)) throw error
+        report(error)
+        return null
+      }
+    })()
+    cached.set(key, result)
+    return result
+  }
+  const cards = scene.elements.flatMap(element => {
+    if (element.isDeleted || element.type !== 'embeddable' || !element.link) return []
+    const target = localReference(element.link, true)
+    return target ? [load(target).then(content => { references.cards[element.id] = content })] : []
+  })
   const imageIds = [...new Set(scene.elements.flatMap(e => !e.isDeleted && e.type === 'image' && e.fileId ? [e.fileId] : []))]
-  await Promise.all(imageIds.map(async id => {
-    if (files[id]) return
-    const target = attachments.get(id)?.split(/[|#]/, 1)[0]
+  await Promise.all([...cards, ...imageIds.map(async id => {
+    if (Object.hasOwn(files, id)) return
+    const value = attachments.get(id)
+    const target = value?.split(/[|#]/, 1)[0]
     if (target) {
+      const reference = localReference(value!)
+      if (reference) {
+        const content = await load(reference)
+        if (content) {
+          references.images[id] = content
+          return
+        }
+      }
       const mimeType = mimeTypes[extname(target).toLowerCase() as keyof typeof mimeTypes]
       if (mimeType) {
         try {
@@ -75,6 +118,6 @@ export async function readAssets(uri: Uri, scene: Scene, attachments: Map<string
       }
     }
     missing.push(target ? basename(target) : id)
-  }))
-  return { files, missing }
+  })])
+  return { files, missing, references }
 }

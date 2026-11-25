@@ -11,6 +11,8 @@ comes from the [Liberation Fonts 2.1.5 release](https://github.com/liberationfon
 - [lz-string](https://github.com/pieroxy/lz-string) (MIT)
 - [pako 2.0.3](https://github.com/nodeca/pako) (MIT and zlib)
 - [yaml](https://github.com/eemeli/yaml) (ISC)
+- [markdown-it 15.0.3](https://github.com/markdown-it/markdown-it) (MIT)
+- [PDF.js 6.4.299](https://github.com/mozilla/pdf.js) (Apache-2.0)
 
 See [licenses/](licenses/) for the dependency and font notices. The bundled JS license
 files next to the build artifacts also preserve upstream license comments.

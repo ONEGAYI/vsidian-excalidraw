@@ -15,6 +15,7 @@ const en = {
   createTitle: 'New Excalidraw Drawing', createFailed: 'Could not create the drawing.', markdownPath: 'Choose a file ending in .md.',
   working: 'Updating the document…',
   openPreview: 'Open drawing: ', previewUnavailable: 'Drawing preview unavailable.',
+  openSource: 'Open source: ', referenceUnavailable: 'Source preview unavailable.',
   emptyPreview: 'Empty drawing.',
 }
 export function strings(locale: string): typeof en {
@@ -35,6 +36,7 @@ export function strings(locale: string): typeof en {
     createTitle: '新建 Excalidraw 图档', createFailed: '无法创建图档。', markdownPath: '请选择以 .md 结尾的文件。',
     working: '正在更新文档…',
     openPreview: '打开画板：', previewUnavailable: '无法显示图档预览。',
+    openSource: '打开原文件：', referenceUnavailable: '无法预览此引用。',
     emptyPreview: '画板为空。',
   } : en
 }

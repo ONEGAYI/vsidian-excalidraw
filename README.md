@@ -47,6 +47,7 @@
 * **本地图片直接显示**：自动解析图档关联的库内图片附件（支持 PNG、JPG、WebP、GIF、SVG），缺图时温和提示并保留文件里的原始引用不丢失。
 * **从文件或剪贴板插图**：进入 **编辑画板**，拖入 PNG、JPEG、WebP 或 GIF，或直接粘贴截图。每次最多 8 MiB；图片以独立附件保存在图档同目录，保存图档后 Obsidian 可打开同一个引用。撤销导入会一并撤销本次创建的附件，重做会恢复。
 * **在笔记中预览图档**：独占一行的 `![[图]]` 在 Vsidian 的 Live 和阅读模式显示只读预览，点击打开原画板，不生成额外的预览文件。需使用提供 `refViews.registerMarkdownPreview` 的 Vsidian 内核；旧内核仍可打开和编辑画板。
+* **在画板上查阅本地资料**：只读预览库内笔记，可按标题或块定位；PDF 按链接中的页码显示。资料卡可打开原文件，保存画板不会改写原资料或把预览存进图档。
 * **图形链接一点即达**：点击画板元素绑定的 `[[双链]]` 可直接用 Vsidian 打开对应笔记，点击 `http(s)://` 外链可直接跳转到浏览器。
 
 ---
@@ -69,7 +70,8 @@
 
 * **工作区与路径解析**：若图档引用了以 Obsidian 库根目录为起点的附件或双链，请在 VS Code 中将 **Obsidian 库根目录** 作为工作区文件夹打开。
 * **当前支持的内容**：支持常见图形、文字与库内已有图片附件的渲染与编辑；Obsidian 端继续使用原社区插件 [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin)，无需额外配置。
-* **暂未覆盖的高级特性**：自定义脚本、网页 / 笔记 / PDF 等高级嵌入不在 Vsidian 画板中执行或渲染，原始数据仍保留。
+* **资料预览范围**：笔记以静态 Markdown 显示，不执行原始 HTML 或递归加载嵌入；笔记文件上限 1 MiB，单个 PDF 上限 32 MiB。超出范围时仍保留原始引用。
+* **暂未覆盖的高级特性**：自定义脚本和网页嵌入不执行，原始数据仍保留。
 
 ---
 
@@ -111,6 +113,7 @@ node test/native.mjs <阶段> out/roundtrip <Vsidian源码目录> <Code.exe> <Vs
 * 依次运行 `seed`（Obsidian 生成 `json` 与 `compressed-json` 两种图档）、`vscode`（Vsidian 阅读、绘制、撤销、切换与保存）、`reopen`（Obsidian 重开校验），以及 `create`、`new`（Vsidian 新建图档、Obsidian 重开校验）。
 * 图片导入验收：同一测试目录依次跑 `seed`、`image-import`、`image-reopen`、`image-return`，覆盖粘贴、拖入、撤销与重做，以及两端保存后重开。
 * 笔记内预览验收：在上述图片测试目录接着跑 `preview-vscode`、`preview-obsidian`，覆盖两种图档格式、普通笔记嵌入、预览点击和源文保真。
+* 画板内资料验收：依次跑 `references-seed`、`references-vscode`、`references-obsidian`，用官方 Obsidian 插件创建带笔记标题、块和 PDF 页码引用的图档，再双端重开验证。
 * Obsidian 插件目录应包含官方发布的 `main.js`、`manifest.json` 和 `styles.css`。测试记录和截图保存在临时目录内，不读写日常使用的库。
 
 ### 发布到 VS Code Marketplace

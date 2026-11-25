@@ -1,5 +1,6 @@
 import { isDrawing, type Scene } from './format.ts'
 import { strings } from './strings.ts'
+import type { LocalContent } from './references.ts'
 
 type Target = { fsPath: string; relPath: string; text: string }
 type PageSdk = {
@@ -20,6 +21,7 @@ function mountPage(sdk: PageSdk) {
   if (!register) return // The preview capability is not required for the standalone board.
   const artworkUrl = sdk.resourceUri('preview-art.js')
   if (!artworkUrl) throw new Error('Excalidraw preview resources were not registered')
+  const assetRoot = new URL('./', artworkUrl).href
   let artwork: Promise<typeof import('./preview-art.ts')> | undefined
   const open = async ({ fsPath }: Target) => {
     const outcome = await sdk.channel.request('drawing.open', { fsPath })
@@ -30,7 +32,7 @@ function mountPage(sdk: PageSdk) {
     async mount(container, target, signal) {
       const words = strings(sdk.locale?.get() || document.documentElement.lang)
       container.textContent = words.loading
-      ;(globalThis as typeof globalThis & { EXCALIDRAW_ASSET_PATH: string }).EXCALIDRAW_ASSET_PATH = new URL('./', artworkUrl).href
+      ;(globalThis as typeof globalThis & { EXCALIDRAW_ASSET_PATH: string }).EXCALIDRAW_ASSET_PATH = assetRoot
       const [result, { renderThumbnail }] = await Promise.all([
         sdk.channel.request('drawing.preview', { fsPath: target.fsPath, text: target.text }),
         artwork ??= import(artworkUrl),
@@ -39,7 +41,8 @@ function mountPage(sdk: PageSdk) {
       let image: string | null
       let unavailable = !result.ok || !result.result
       try {
-        image = result.ok && result.result ? await renderThumbnail(result.result as Scene) : null
+        const drawing = result.ok ? result.result as { scene: Scene; imageReferences: Record<string, LocalContent> } | null : null
+        image = drawing ? await renderThumbnail(drawing.scene, drawing.imageReferences, assetRoot) : null
       } catch (error) {
         console.error('Could not render Excalidraw preview:', error)
         image = null

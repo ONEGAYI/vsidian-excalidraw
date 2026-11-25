@@ -25,6 +25,13 @@ const invariant = 'Original note content — 画板往返'
 const asset = 'assets/reference.svg'
 const gallery = 'Gallery.md'
 const gallerySource = '# Drawing gallery\n\n![[Compressed.excalidraw]]\n\n![[Plain]]\n\n![[Readme]]\n'
+const localBoard = 'Local references.excalidraw.md'
+const localNote = 'Reference.md'
+const localPdf = 'assets/pages.pdf'
+const sectionMarker = 'Northern section marker'
+const blockMarker = 'Portable block marker'
+const referencesNote = '# Remote section\n\nDo not show this section\n\n## Selected section\n\n**' + sectionMarker +
+  '**\n\n## Example block\n\n' + blockMarker + ' ^portable-block\n\nDo not show this other paragraph\n'
 
 async function retry(probe, reason, timeout = 30_000) {
   const end = Date.now() + timeout
@@ -182,7 +189,42 @@ if (stage === 'seed') {
       console.log('PASS: Obsidian generated', file, scene.payload.kind, expected)
     }
   })
-} else if (['vscode', 'create', 'image-import', 'image-return', 'preview-vscode'].includes(stage)) {
+} else if (stage === 'references-seed') {
+  await writeFile(path.join(vault, localNote), referencesNote)
+  await writeFile(path.join(vault, localPdf), fixturePdf())
+  let seeded
+  await obsidian(async page => {
+    await page.evaluate(id => app.plugins.plugins[id]
+      .openDrawing(app.vault.getFileByPath('Warmup.excalidraw.md'), 'active-pane', true), pluginId)
+    await page.waitForFunction(() => app.workspace.activeLeaf?.view?._loaded &&
+      app.workspace.activeLeaf.view.file?.path === 'Warmup.excalidraw.md', undefined, { timeout: 14000 })
+    seeded = await page.evaluate(async ({ board, note, pdf, pluginId }) => {
+        const plugin = app.plugins.plugins[pluginId]
+        plugin.settings.compress = true
+        const ea = plugin.ea
+        ea.reset()
+        ea.setView('active')
+        const file = app.vault.getFileByPath(note)
+        const section = ea.addEmbeddable(0, 0, 360, 155, undefined, file)
+        const block = ea.addEmbeddable(390, 0, 360, 155, undefined, file)
+        ea.getElement(section).link = '[[' + note + '#Selected section]]'
+        ea.getElement(block).link = '[[' + note + '#^portable-block]]'
+        const image = await ea.addImage(40, 190, pdf + '#page=2')
+        if (!image) throw new Error('Obsidian did not insert the PDF page')
+        const chart = await ea.create({ filename: board.replace(/\.md$/, ''), foldername: '', onNewPane: false })
+        if (chart !== board) await app.fileManager.renameFile(app.vault.getFileByPath(chart), board)
+        return { section, block, image }
+    }, { board: localBoard, note: localNote, pdf: localPdf, pluginId })
+  })
+  const source = await readFile(path.join(vault, localBoard), 'utf8')
+  const drawing = readDrawing(source)
+  const pdf = drawing.scene.elements.find(el => el.id === seeded.image)
+  assert.equal(drawing.scene.elements.find(el => el.id === seeded.section).link, '[[' + localNote + '#Selected section]]')
+  assert.equal(drawing.scene.elements.find(el => el.id === seeded.block).link, '[[' + localNote + '#^portable-block]]')
+  assert(drawing.attachments.get(pdf.fileId)?.includes(localPdf + '#page=2'))
+  console.log('PASS: official Obsidian plugin produced two note selectors and a PDF page image', seeded)
+  await writeFile(path.join(session, localBoard + '.references-original'), source)
+} else if (['vscode', 'create', 'image-import', 'image-return', 'preview-vscode', 'references-vscode'].includes(stage)) {
   if (stage === 'preview-vscode') await writeFile(path.join(vault, gallery), gallerySource)
   if (stage === 'vscode' || stage === 'image-import') {
     for (const file of cases) await cp(path.join(session, file + '.original'), path.join(vault, file))
@@ -228,6 +270,25 @@ if (stage === 'seed') {
     assert.equal(await readFile(path.join(vault, gallery), 'utf8'), gallerySource)
     console.log('PASS: Obsidian reads both unchanged wiki-embeds from the same Markdown note')
   })
+} else if (stage === 'references-obsidian') {
+  const source = await readFile(path.join(vault, localBoard), 'utf8')
+  await obsidian(async page => {
+    await page.evaluate(({ pluginId, file }) => app.plugins.plugins[pluginId]
+      .openDrawing(app.vault.getFileByPath(file), 'active-pane', true), { pluginId, file: localBoard })
+    const activeId = await page.waitForFunction(file =>
+      app.workspace.activeLeaf?.view?.file?.path === file &&
+      app.workspace.activeLeaf.view.excalidrawAPI?.getSceneElements().some(el => el.type === 'rectangle'),
+    localBoard, { timeout: 12000 })
+    assert(activeId)
+    await retry(() => page.evaluate(hasSecondPdfPage), 'Obsidian did not paint the referenced second PDF page')
+    await page.getByText(sectionMarker, { exact: true }).waitFor({ state: 'visible', timeout: 12000 })
+    await page.getByText(blockMarker, { exact: true }).waitFor({ state: 'visible', timeout: 12000 })
+    await page.screenshot({ path: path.join(session, 'obsidian-local-references.png') })
+  })
+  assert.equal(await readFile(path.join(vault, localBoard), 'utf8'), source)
+  assert.equal(await readFile(path.join(vault, localNote), 'utf8'), referencesNote)
+  assert((await readFile(path.join(vault, localPdf))).equals(fixturePdf()))
+  console.log('PASS: Obsidian paints both note selectors and PDF page 2 after a Vsidian edit')
 } else if (stage === 'reopen' || stage === 'new' || stage === 'image-reopen') {
   const selected = stage === 'new' ? ['Drawing.excalidraw.md'] : cases
   for (const file of selected) {
@@ -350,6 +411,55 @@ async function vscodeFlow(page) {
   }, 'No visible frame: ' + locator)
   const markdownView = 'onegayi.vsidian.editor'
   const boardView = 'onegayi.vsidian-excalidraw.board'
+
+  if (stage === 'references-vscode') {
+    const original = await readFile(path.join(session, localBoard + '.references-original'), 'utf8')
+    await writeFile(path.join(vault, localBoard), original)
+    const before = readDrawing(original)
+    await command('board', localBoard)
+    await hasView(boardView, localBoard)
+    let frame = await frameWith('.board-toolbar')
+    const button = name => frame.locator('.board-toolbar').getByRole('button', { name, exact: true })
+    await frame.getByText(sectionMarker, { exact: true }).waitFor({ state: 'visible', timeout: 6000 })
+    await frame.getByText(blockMarker, { exact: true }).waitFor({ state: 'visible', timeout: 6000 })
+    assert.equal(await frame.getByText(/Do not show this/).filter({ visible: true }).count(), 0)
+    await retry(() => frame.evaluate(hasSecondPdfPage), 'Vsidian did not paint the referenced second PDF page')
+    await page.screenshot({ path: path.join(session, 'vscode-local-references.png') })
+    console.log('PASS: Vsidian paints both resolved note selections and PDF page 2')
+    await frame.getByRole('button', { name: 'Open source: ' + localNote + '#Selected section', exact: true }).click()
+    await hasView(markdownView, localNote)
+    assert.equal((await command('snapshot', localNote)).source, referencesNote)
+    await command('board', localBoard)
+    await hasView(boardView, localBoard)
+    frame = await frameWith('.board-toolbar')
+    await button('Edit drawing').click()
+    const bounds = await frame.locator('.excalidraw').boundingBox()
+    assert(bounds)
+    const x = bounds.x + bounds.width - 150, y = bounds.y + bounds.height - 190
+    await page.mouse.click(x, y)
+    await page.keyboard.press('r')
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.move(x + 50, y + 65, { steps: 6 })
+    await page.mouse.up()
+    await retry(() => button('Save').isEnabled(), 'A new rectangle next to the previews did not become saveable')
+    await button('Save').click()
+    const saved = await retry(async () => {
+      const drawing = readDrawing(await readFile(path.join(vault, localBoard), 'utf8'))
+      return drawing.stored.elements.some(el => el.type === 'rectangle') && drawing
+    }, 'Vsidian did not save the edit alongside the embeds')
+    assert.equal(saved.payload.kind, before.payload.kind)
+    assert.deepEqual(saved.attachments, before.attachments)
+    for (const el of before.stored.elements.filter(e => e.type === 'embeddable' || e.type === 'image')) {
+      assert.deepEqual(saved.stored.elements.find(e => e.id === el.id), el)
+    }
+    assert.deepEqual(saved.stored.files, before.stored.files)
+    assert.equal(await readFile(path.join(vault, localNote), 'utf8'), referencesNote)
+    assert((await readFile(path.join(vault, localPdf))).equals(fixturePdf()))
+    console.log('PASS: opening the source and saving a new shape left each original reference and source file unchanged')
+    await command('stop')
+    return
+  }
 
   if (stage === 'preview-vscode') {
     page.on('requestfailed', req => console.error('[preview resource]', req.failure()?.errorText, req.url().slice(0, 420)))
@@ -630,6 +740,41 @@ function readPaint(requireGreen = false) {
     }
     if (right > left && blue > 50 && (!requireGreen || green > 50)) return { left, right, top, bottom, blue, green, width: canvas.width, height: canvas.height }
   }
+}
+
+function hasSecondPdfPage() {
+  for (const canvas of document.querySelectorAll('.excalidraw canvas')) {
+    if (!canvas.width || !canvas.height) continue
+    const ctx = canvas.getContext('2d')
+    if (!ctx) continue
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    let secondPage = 0, firstPage = 0
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 200) continue
+      if (data[i] > 175 && data[i + 1] < 55 && data[i + 2] > 140) secondPage++
+      if (data[i] > 210 && data[i + 1] > 130 && data[i + 2] < 75) firstPage++
+    }
+    if (secondPage > 100 && firstPage === 0) return true
+  }
+  return false
+}
+
+function fixturePdf() {
+  // Two pages with different solid artwork, so a header or page number cannot pass the paint assertion.
+  const streams = ['1 .70 .05 rg 20 20 100 70 re f\n', '.78 .07 .66 rg 20 20 100 70 re f\n']
+  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >>',
+    ...[5, 6].map(n => '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 140 110] /Resources <<>> /Contents ' + n + ' 0 R >>'),
+    ...streams.map(s => '<< /Length ' + s.length + ' >>\nstream\n' + s + 'endstream')]
+  let pdf = '%PDF-1.4\n'
+  const offsets = [0]
+  for (const [i, object] of objects.entries()) {
+    offsets.push(pdf.length)
+    pdf += (i + 1) + ' 0 obj\n' + object + '\nendobj\n'
+  }
+  const xref = pdf.length
+  pdf += 'xref\n0 ' + offsets.length + '\n0000000000 65535 f \n' + offsets.slice(1)
+    .map(offset => String(offset).padStart(10, '0') + ' 00000 n \n').join('')
+  return Buffer.from(pdf + 'trailer\n<< /Size ' + offsets.length + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n')
 }
 async function createFlow(page, command, frameWith, hasView) {
   const file = 'Drawing.excalidraw.md'

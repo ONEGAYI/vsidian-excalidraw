@@ -47,3 +47,32 @@ body {
 .excalidraw .undo-redo-buttons,
 .excalidraw [data-testid="button-undo"],
 .excalidraw [data-testid="button-redo"] { display: none !important; }
+
+.board-reference {
+  box-sizing: border-box;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border, #8886);
+  font: 15px/1.45 var(--vscode-font-family);
+}
+.board-reference button {
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--vscode-panel-border, #8886);
+  background: var(--vscode-editor-background);
+  color: var(--vscode-textLink-foreground);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-reference button:not(:disabled) { cursor: pointer; pointer-events: auto; }
+.board-reference button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -2px; }
+.board-reference-text { flex: 1; overflow: auto; padding: 4px 12px; overflow-wrap: anywhere; }
+.board-reference-text h1, .board-reference-text h2, .board-reference-text h3, .board-reference-text p { margin: 6px 0; }
+.board-reference > p { margin: 8px 12px; }
+.board-reference img { min-height: 0; flex: 1; object-fit: contain; }

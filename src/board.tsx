@@ -6,6 +6,7 @@ import type { Element, Scene } from './format.ts'
 import { imageImportLimit, importedImageTypes, type ImportedImage, type Message, type Request, type State } from './protocol.ts'
 import { createSceneDiff, isPortableText } from './scene.ts'
 import { strings } from './strings.ts'
+import { renderReferenceImages } from './reference-art.ts'
 import './board.css'
 
 declare global {
@@ -36,6 +37,8 @@ let viewed = false
 let importFlight = Promise.resolve()
 let imageNotice: string | undefined
 const pendingImages = new Map<string, ImportedImage>()
+let incomingState = 0
+let pdfCards: Awaited<ReturnType<typeof renderReferenceImages>>['files'] = {}
 
 const capture = () => structuredClone(api!.getSceneElementsIncludingDeleted()) as unknown as Element[]
 
@@ -212,6 +215,22 @@ function bind(next: ExcalidrawImperativeAPI) {
   api = next
 }
 
+function applyState(data: State, cards: typeof pdfCards = {}) {
+  if (!data.force && (flight || hasChanges())) {
+    // Resuming the addon on the same document revision must not replace a draft.
+    if (data.version !== revision) issue = 'conflict'
+    else schedule()
+  } else {
+    pdfCards = cards
+    const first = !doc?.scene
+    doc = data
+    issue = undefined
+    revision = data.version
+    if (data.scene) install(data.scene)
+    if (first || data.force || !data.scene) editing = false
+  }
+}
+
 window.addEventListener('message', ({ data }: MessageEvent<Message>) => {
   switch (data.kind) {
     case 'result': {
@@ -223,24 +242,29 @@ window.addEventListener('message', ({ data }: MessageEvent<Message>) => {
     case 'status':
       dirty = data.dirty
       break
-    case 'state':
+    case 'state': {
       if (data.enabled && !data.force && data.version < revision) return
+      const incoming = ++incomingState
       enabled = data.enabled
       dirty = data.dirty
       if (!enabled) break
-      if (!data.force && (flight || hasChanges())) {
-        // Resuming the addon on the same document revision must not replace a draft.
-        if (data.version !== revision) issue = 'conflict'
-        else schedule()
-      } else {
-        const first = !doc?.scene
-        doc = data
-        issue = undefined
-        revision = data.version
-        if (data.scene) install(data.scene)
-        if (first || data.force || !data.scene) editing = false
+      const { scene, references } = data
+      const pdfs = Object.fromEntries(Object.entries(references?.cards ?? {}).filter(
+        (entry): entry is [string, Extract<NonNullable<typeof entry[1]>, { kind: 'pdf' }>] => entry[1]?.kind === 'pdf'))
+      if (scene && references && (Object.keys(references.images).length || Object.keys(pdfs).length)) {
+        const rootUrl = new URL('./', import.meta.url).href
+        void Promise.all([renderReferenceImages(references.images, rootUrl), renderReferenceImages(pdfs, rootUrl)])
+          .then(([images, cards]) => {
+            if (incoming !== incomingState || (!data.force && data.version < revision)) return
+            applyState({ ...data, scene: { ...scene, files: { ...scene.files, ...images.files } },
+              references: { cards: references.cards, images: {} }, missing: [...data.missing, ...images.missing] }, cards.files)
+            render()
+          })
+        break
       }
+      applyState(data)
       break
+    }
   }
   render()
 })
@@ -343,7 +367,24 @@ function render() {
         }}
         onPaste={(data, event) => !event?.clipboardData?.files.length
           && !data.elements?.some(element => element.type === 'image')}
-        validateEmbeddable={false}
+        validateEmbeddable={link => doc?.scene?.elements.some(element => element.link === link
+          && Object.hasOwn(doc?.references?.cards ?? {}, element.id)) ?? false}
+        renderEmbeddable={element => {
+          const reference = doc?.references?.cards[element.id]
+          const link = element.link ?? ''
+          const label = link.slice(2, -2).split('|', 1)[0]
+          return <section className="board-reference">
+            <button type="button" aria-label={words.openSource + label} disabled={!enabled || editing}
+              onPointerDown={event => event.stopPropagation()}
+              onClick={event => {
+                event.stopPropagation()
+                bridge.postMessage({ kind: 'link', link })
+              }}>{label}</button>
+            {reference?.kind === 'note' ? <div className="board-reference-text" dangerouslySetInnerHTML={{ __html: reference.html }} />
+              : pdfCards[element.id] ? <img src={pdfCards[element.id].dataURL} alt={label} />
+                : <p>{words.referenceUnavailable}</p>}
+          </section>
+        }}
         UIOptions={{ tools: { image: false }, canvasActions: {
           changeViewBackgroundColor: false, clearCanvas: false, loadScene: false, saveToActiveFile: false,
           export: false, saveAsImage: false, toggleTheme: false,

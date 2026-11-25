@@ -1,10 +1,16 @@
 import type { DrawingPatch, Scene } from './format.ts'
+import type { LocalContent } from './references.ts'
 
 export const importedImageTypes = {
   'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
 } as const
 export const imageImportLimit = 8 * 1024 * 1024
 export type ImportedImage = { id: string; dataURL: string }
+
+export type LocalReferences = {
+  cards: Record<string, LocalContent | null>
+  images: Record<string, LocalContent>
+}
 
 export type Request =
   | { kind: 'ready' | 'reload' }
@@ -18,6 +24,7 @@ export type State = {
   dirty: boolean
   enabled: boolean
   scene?: Scene
+  references?: LocalReferences
   missing: string[]
   force: boolean
 }
