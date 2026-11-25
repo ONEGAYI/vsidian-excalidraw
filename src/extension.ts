@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { posix } from 'node:path'
+import { isAbsolute, posix } from 'node:path'
 import {
   commands, env, extensions, Position, Range, TabInputCustom, TabInputText, Uri, window, workspace, WorkspaceEdit,
   type Disposable, type ExtensionContext, type TextDocument, type WebviewPanel,
@@ -15,7 +15,11 @@ const HOST = 'onegayi.vsidian'
 
 type Vsidian = {
   registerAddon(owner: { id: string }, definition: {
-    enable(ctx: { onDispose(callback: () => void): void }): void
+    enable(ctx: {
+      pages: { registerEditor(entry: { entry: string; resources: string[] }): Disposable }
+      channel: { handle(topic: string, handler: (payload: unknown) => unknown): Disposable }
+      onDispose(callback: () => void): void
+    }): void
   }): { ok: true; dispose(): void } | { ok: false; reason: string }
 }
 
@@ -188,7 +192,28 @@ export async function activate(context: ExtensionContext) {
   }
 
   const addon = api.registerAddon(context.extension, {
-    enable({ onDispose }) {
+    enable({ pages, channel, onDispose }) {
+      pages.registerEditor({ entry: 'dist/preview.js', resources: ['dist/board'] })
+      for (const topic of ['drawing.preview', 'drawing.open']) {
+        channel.handle(topic, async payload => {
+          if (!payload || typeof payload !== 'object' || !('fsPath' in payload) ||
+              typeof payload.fsPath !== 'string' || !isAbsolute(payload.fsPath) || !/\.md$/i.test(payload.fsPath)) return null
+          const uri = Uri.file(payload.fsPath)
+          if (topic === 'drawing.open') {
+            await commands.executeCommand('vsidianExcalidraw.open', uri)
+            return true
+          }
+          if (!('text' in payload) || typeof payload.text !== 'string' || !isDrawing(payload.text)) return null
+          try {
+            const drawing = readDrawing(payload.text)
+            const assets = await readAssets(uri, drawing.scene, drawing.attachments, report)
+            return { ...drawing.scene, files: assets.files }
+          } catch (error) {
+            report(error)
+            return null
+          }
+        })
+      }
       enabled = true
       void commands.executeCommand('setContext', 'vsidianExcalidraw.enabled', true)
       syncTitle()

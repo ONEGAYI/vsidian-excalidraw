@@ -9,8 +9,8 @@ await build({
 })
 let fontFallbackRemoved = false
 await build({
-  entryPoints: ['src/board.tsx'], outdir: 'dist/board', entryNames: '[name]',
-  bundle: true, platform: 'browser', format: 'esm', target: 'chrome114', minify: true,
+  entryPoints: ['src/board.tsx', 'src/preview-art.ts'], outdir: 'dist/board', entryNames: '[name]',
+  bundle: true, splitting: true, platform: 'browser', format: 'esm', target: 'chrome114', minify: true,
   conditions: ['production'], define: { 'process.env.NODE_ENV': '"production"' },
   loader: { '.woff2': 'file', '.woff': 'file', '.ttf': 'file' }, legalComments: 'linked',
   plugins: [{
@@ -28,6 +28,11 @@ await build({
       })
     },
   }],
+})
+await build({
+  entryPoints: ['src/preview.ts'], outfile: 'dist/preview.js',
+  bundle: true, platform: 'browser', format: 'iife', target: 'chrome114', minify: true,
+  legalComments: 'linked',
 })
 if (!fontFallbackRemoved) throw new Error('The bundled Excalidraw font source changed; check the offline font path')
 const from = 'node_modules/@excalidraw/excalidraw/dist/prod'

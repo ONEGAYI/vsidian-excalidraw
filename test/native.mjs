@@ -10,7 +10,7 @@ import { newDrawing, readDrawing } from '../src/format.ts'
 
 const [stage, sessionPath, vsidianSource, vscodeExe, vsidianExtension, obsidianExe, pluginSource, installedAddon] = process.argv.slice(2)
 if (!stage || !sessionPath || !vsidianSource || !vscodeExe || !vsidianExtension || !obsidianExe || !pluginSource) {
-  throw new Error('Usage: node test/native.mjs <seed|vscode|reopen|create|new|image-import|image-reopen|image-return> <session-dir> <Vsidian-source> <Code.exe> <Vsidian-extension> <Obsidian.exe> <Obsidian-plugin-dir> [addonDir]')
+  throw new Error('Usage: node test/native.mjs <stage> <session-dir> <Vsidian-source> <Code.exe> <Vsidian-extension> <Obsidian.exe> <Obsidian-plugin-dir> [addonDir]')
 }
 const { runTestHost, buildTestHostArgs } = await import(pathToFileURL(path.resolve(vsidianSource, 'test/integration/testHost.mjs')))
 const addon = installedAddon ?? fileURLToPath(new URL('..', import.meta.url))
@@ -23,6 +23,8 @@ const linkedLabel = 'Original [[Readme|Label]]'
 const editedLinkedLabel = linkedLabel.replace('Original', 'Edited in Vsidian')
 const invariant = 'Original note content — 画板往返'
 const asset = 'assets/reference.svg'
+const gallery = 'Gallery.md'
+const gallerySource = '# Drawing gallery\n\n![[Compressed.excalidraw]]\n\n![[Plain]]\n\n![[Readme]]\n'
 
 async function retry(probe, reason, timeout = 30_000) {
   const end = Date.now() + timeout
@@ -180,7 +182,8 @@ if (stage === 'seed') {
       console.log('PASS: Obsidian generated', file, scene.payload.kind, expected)
     }
   })
-} else if (['vscode', 'create', 'image-import', 'image-return'].includes(stage)) {
+} else if (['vscode', 'create', 'image-import', 'image-return', 'preview-vscode'].includes(stage)) {
+  if (stage === 'preview-vscode') await writeFile(path.join(vault, gallery), gallerySource)
   if (stage === 'vscode' || stage === 'image-import') {
     for (const file of cases) await cp(path.join(session, file + '.original'), path.join(vault, file))
   }
@@ -201,6 +204,30 @@ if (stage === 'seed') {
     page.on('pageerror', error => console.error('[workbench]', error.message))
     await vscodeFlow(page)
   }, { VSED_SESSION: session, VSED_RUN: runId, VSIDIAN_TEST_HOOKS: '1' })
+} else if (stage === 'preview-obsidian') {
+  await obsidian(async page => {
+    await page.evaluate(async file => {
+      const leaf = app.workspace.getLeaf(false)
+      await leaf.openFile(app.vault.getFileByPath(file), { state: { mode: 'preview' } })
+    }, gallery)
+    const draws = page.locator('.markdown-preview-view .excalidraw-embedded-img')
+    for (let i = 0; i < cases.length; i++) await draws.nth(i).waitFor({ state: 'visible', timeout: 15000 }).catch(async error => {
+      console.error('Obsidian embeds:', await page.locator('.markdown-preview-view').evaluateAll(views =>
+        views.map(view => ({ text: view.textContent?.slice(0, 350), embeds: [...view.querySelectorAll('.internal-embed, [class*="excalidraw"]')]
+          .map(el => [el.tagName, el.className, el.getAttribute('src')?.slice(0, 100)]).slice(0, 16) }))))
+      throw error
+    })
+    assert.equal(await draws.count(), cases.length)
+    for (let i = 0; i < cases.length; i++) {
+      const count = await draws.nth(i).locator('svg:visible, img:visible, canvas:visible').count()
+        + Number(await draws.nth(i).evaluate(el => el.matches('img,svg,canvas')))
+      assert(count > 0, 'Obsidian did not render an image for ' + cases[i])
+    }
+    await page.getByText('Normal Markdown', { exact: true }).waitFor({ state: 'visible', timeout: 10000 })
+    await page.screenshot({ path: path.join(session, 'obsidian-gallery.png') })
+    assert.equal(await readFile(path.join(vault, gallery), 'utf8'), gallerySource)
+    console.log('PASS: Obsidian reads both unchanged wiki-embeds from the same Markdown note')
+  })
 } else if (stage === 'reopen' || stage === 'new' || stage === 'image-reopen') {
   const selected = stage === 'new' ? ['Drawing.excalidraw.md'] : cases
   for (const file of selected) {
@@ -323,6 +350,59 @@ async function vscodeFlow(page) {
   }, 'No visible frame: ' + locator)
   const markdownView = 'onegayi.vsidian.editor'
   const boardView = 'onegayi.vsidian-excalidraw.board'
+
+  if (stage === 'preview-vscode') {
+    page.on('requestfailed', req => console.error('[preview resource]', req.failure()?.errorText, req.url().slice(0, 420)))
+    const sources = await Promise.all(cases.map(name => readFile(path.join(vault, name), 'utf8')))
+    await command('markdown', gallery)
+    await hasView(markdownView, gallery)
+    const frame = await frameWith('.vsidian-view-toggle')
+    for (const [i, mode] of ['Live', 'Reading'].entries()) {
+      const toggle = frame.getByRole('button', { name: i === 0 ? 'Switch to reading view' : 'Switch to live preview', exact: true })
+      const draws = frame.locator('.vsidian-embed-card img[data-excalidraw-preview]:visible')
+      await retry(async () => {
+        if (await draws.count() !== cases.length) return false
+        const painted = await draws.evaluateAll(async images => {
+          return images.map(image => {
+            if (!image.complete || !image.naturalWidth || !image.naturalHeight) return false
+            const canvas = document.createElement('canvas')
+            canvas.width = 240
+            canvas.height = 160
+            const ctx = canvas.getContext('2d')
+            ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+            const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+            let red = 0, blue = 0, green = 0
+            for (let p = 0; p < data.length; p += 4) {
+              const [r,g,b,a] = data.subarray(p, p + 4)
+              if (a > 180 && r > 160 && g < 80 && b < 80) red++
+              if (a > 180 && b > 155 && r < 60 && g > 60 && g < 125) blue++
+              if (a > 180 && g > 150 && r < 60 && b > 45 && b < 120) green++
+            }
+            return red > 25 && blue > 50 && green > 50
+          }).every(Boolean)
+        })
+        return painted && (await frame.getByText('Normal Markdown', { exact: true }).filter({ visible: true }).count()) > 0
+      }, mode + ' did not paint compressed and plain drawing embeds with their original and imported attachments', 12000).catch(async error => {
+        console.error('Preview cards:', await frame.locator('.vsidian-embed-card').evaluateAll(cards => cards.map(card => ({
+          text: card.textContent?.slice(0, 230),
+          images: [...card.querySelectorAll('img')].map(img => [img.alt, img.complete, img.naturalWidth, img.naturalHeight]),
+        }))))
+        await page.screenshot({ path: path.join(session, 'vscode-gallery-failure.png') })
+        throw error
+      })
+      assert.equal((await command('snapshot', gallery)).source, gallerySource)
+      await page.screenshot({ path: path.join(session, 'vscode-gallery-' + mode.toLowerCase() + '.png') })
+      console.log('PASS: ' + mode + ' paints two drawings with attachments and leaves the normal note embed in place')
+      if (i === 0) await toggle.click({ timeout: 5000 })
+    }
+    await frame.locator('img[data-excalidraw-preview]:visible').first().click()
+    await hasView(boardView, cases[0])
+    assert.equal((await command('snapshot', cases[0])).source, sources[0])
+    assert.equal((await command('snapshot', cases[1])).source, sources[1])
+    console.log('PASS: preview opens the source board without rewriting any note')
+    await command('stop')
+    return
+  }
 
   if (stage === 'create') {
     await createFlow(page, command, frameWith, hasView)
