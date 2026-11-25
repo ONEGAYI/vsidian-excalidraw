@@ -1,0 +1,65 @@
+{
+  "name": "vsidian-excalidraw",
+  "publisher": "ONEGAYI",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/ONEGAYI/vsidian-excalidraw.git" },
+  "private": true,
+  "type": "module",
+  "main": "./dist/extension.cjs",
+  "engines": { "vscode": "^1.82.3" },
+  "extensionKind": ["workspace"],
+  "extensionDependencies": ["onegayi.vsidian"],
+  "activationEvents": ["onStartupFinished"],
+  "categories": ["Visualization"],
+  "keywords": ["vsidian-addon", "excalidraw"],
+  "vsidianAddon": { "manifestVersion": 1, "api": "^1.1.0" },
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "onegayi.vsidian-excalidraw.board",
+        "displayName": "%editor.displayName%",
+        "selector": [{ "filenamePattern": "*.md" }],
+        "priority": "option"
+      }
+    ],
+    "commands": [
+      { "command": "vsidianExcalidraw.open", "title": "%open.title%", "category": "Vsidian", "icon": "$(paintcan)" },
+      { "command": "vsidianExcalidraw.create", "title": "%create.title%", "category": "Vsidian" }
+    ],
+    "menus": {
+      "editor/title": [
+        { "command": "vsidianExcalidraw.open", "when": "vsidianExcalidraw.canOpen && activeCustomEditorId != onegayi.vsidian-excalidraw.board", "group": "navigation@90" }
+      ],
+      "commandPalette": [
+        { "command": "vsidianExcalidraw.open", "when": "vsidianExcalidraw.enabled" },
+        { "command": "vsidianExcalidraw.create", "when": "vsidianExcalidraw.enabled" }
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "build": "node build.mjs",
+    "compile": "npm run typecheck && npm run build",
+    "package": "vsce package --no-dependencies --out out/",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@excalidraw/excalidraw": "0.18.1",
+    "@types/node": "22.20.4",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@types/vscode": "1.82.0",
+    "@vscode/vsce": "4.0.0",
+    "esbuild": "0.28.2",
+    "lz-string": "1.5.0",
+    "playwright": "1.62.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript": "6.0.3",
+    "yaml": "2.9.1"
+  }
+}

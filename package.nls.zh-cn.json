@@ -1,0 +1,7 @@
+{
+  "extension.displayName": "Vsidian Excalidraw",
+  "extension.description": "直接阅读和绘制 Obsidian Excalidraw 图档，保留原 Markdown 文件。",
+  "editor.displayName": "Excalidraw 画板",
+  "open.title": "在 Excalidraw 画板中打开",
+  "create.title": "新建 Excalidraw 图档"
+}

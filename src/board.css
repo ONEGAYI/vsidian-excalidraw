@@ -1,0 +1,49 @@
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+body {
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  font: var(--vscode-font-weight) var(--vscode-font-size) var(--vscode-font-family);
+}
+#root { display: flex; flex-direction: column; }
+.board-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+.board-mode, .board-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.board-toolbar button, .board-notice button {
+  font: inherit;
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  cursor: pointer;
+}
+.board-toolbar button:hover:not(:disabled), .board-notice button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+.board-toolbar button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+.board-toolbar button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+.board-toolbar button:focus-visible, .board-notice button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.board-toolbar button:disabled { opacity: 0.5; cursor: default; }
+.board-status { color: var(--vscode-descriptionForeground); padding-inline: 4px; }
+.board-notice { padding: 8px 12px; color: var(--vscode-editorWarning-foreground); border-bottom: 1px solid var(--vscode-panel-border); }
+.board-notice button { margin-inline-start: 8px; }
+.board-canvas { flex: 1; min-height: 0; position: relative; }
+.board-canvas > p { margin: 12px; }
+.excalidraw .undo-redo-buttons,
+.excalidraw [data-testid="button-undo"],
+.excalidraw [data-testid="button-redo"] { display: none !important; }
