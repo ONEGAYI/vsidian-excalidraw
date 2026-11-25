@@ -1,11 +1,14 @@
-import { Excalidraw } from '@excalidraw/excalidraw'
-import type { AppState, ExcalidrawImperativeAPI, ExcalidrawInitialDataState } from '@excalidraw/excalidraw/types'
+import { CaptureUpdateAction, convertToExcalidrawElements, Excalidraw, viewportCoordsToSceneCoords } from '@excalidraw/excalidraw'
+import type { AppState, BinaryFileData, ExcalidrawImperativeAPI, ExcalidrawInitialDataState } from '@excalidraw/excalidraw/types'
 import '@excalidraw/excalidraw/index.css'
+import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Element, Scene } from './format.ts'
-import type { Message, Request, State } from './protocol.ts'
-import { createSceneDiff, isPortableText } from './scene.ts'
+import { imageImportLimit, importedImageTypes, type ImportedImage, type Message, type Request, type State } from './protocol.ts'
+import { canPasteSceneElements, createSceneDiff, displayElements, isPortableText, projectCanvasElement } from './scene.ts'
 import { strings } from './strings.ts'
+import { renderReferenceImages } from './reference-art.ts'
+import { webLink } from './web.ts'
 import './board.css'
 
 declare global {
@@ -33,11 +36,18 @@ let nextId = 0
 const waiting = new Map<number, (result: Extract<Message, { kind: 'result' }>) => void>()
 let initial: ExcalidrawInitialDataState
 let viewed = false
+let importFlight = Promise.resolve()
+let imageNotice: string | undefined
+const queuedImports: { files: BinaryFileData[]; elements: ReturnType<typeof convertToExcalidrawElements> }[] = []
+const pendingImages = new Map<string, ImportedImage>()
+let incomingState: AbortController | undefined
+let pdfCards: Awaited<ReturnType<typeof renderReferenceImages>>['files'] = {}
+let permittedWebOrigins = new Set<string>()
 
 const capture = () => structuredClone(api!.getSceneElementsIncludingDeleted()) as unknown as Element[]
 
-function request(command: { kind: 'patch'; version: number; patch: ReturnType<typeof diff> }
-  | { kind: 'save' | 'markdown' | 'undo' | 'redo' }) {
+function request(command: { kind: 'patch'; version: number; patch: ReturnType<typeof diff>; images?: ImportedImage[] }
+  | { kind: 'save' | 'undo' | 'redo' } | { kind: 'markdown'; preserveBoard?: true }) {
   const id = ++nextId
   return new Promise<Extract<Message, { kind: 'result' }>>(resolve => {
     waiting.set(id, resolve)
@@ -47,6 +57,7 @@ function request(command: { kind: 'patch'; version: number; patch: ReturnType<ty
 
 function hasChanges() {
   if (!editing || !api || !baseline) return false
+  if (queuedImports.length) return true
   const patch = diff(baseline, capture())
   return !!(patch.elements.length || patch.order)
 }
@@ -67,16 +78,33 @@ function flush(): Promise<boolean> {
   if (!hasChanges()) return Promise.resolve(true)
   flight = (async () => {
     while (enabled && baseline && editing && api && !issue && !pressed && !api.getAppState().editingTextElement) {
-      const elements = capture()
-      const patch = diff(baseline, elements)
-      if (!patch.elements.length && !patch.order) break
+      let elements = capture()
+      let patch = diff(baseline, elements)
       if (!validateText(patch)) break
-      const result = await request({ kind: 'patch', version: revision, patch })
+      if (!patch.elements.length && !patch.order) {
+        // Admit one paste/drop only after the previous document edit was acknowledged.
+        // The image elements and their files must share a single WorkspaceEdit.
+        const batch = queuedImports.shift()
+        if (!batch) break
+        for (const data of batch.files) pendingImages.set(data.id, data)
+        api.addFiles(batch.files)
+        api.updateScene({
+          elements: [...api.getSceneElementsIncludingDeleted(), ...batch.elements],
+          appState: { selectedElementIds: Object.fromEntries(batch.elements.map(element => [element.id, true])) },
+          captureUpdate: CaptureUpdateAction.NEVER,
+        })
+        elements = capture()
+        patch = diff(baseline, elements)
+      }
+      const fileIds = new Set(patch.elements.flatMap(({ fields }) => fields.fileId && !fields.isDeleted ? [fields.fileId] : []))
+      const images = [...pendingImages.values()].filter(image => fileIds.has(image.id))
+      const result = await request({ kind: 'patch', version: revision, patch, ...(images.length ? { images } : {}) })
       if (result.reason) {
         if (result.reason === 'disabled') return false
         if (result.reason !== 'inactive') issue = result.reason
         break
       }
+      for (const image of images) pendingImages.delete(image.id)
       baseline = elements
       revision = result.version
     }
@@ -99,9 +127,10 @@ function schedule(state?: AppState) {
 }
 
 async function finishOperation(kind: 'save' | 'markdown' | 'undo' | 'redo' | 'done') {
+  await importFlight
   if (kind === 'markdown' && (!enabled || issue)) {
     // Retain the canvas and its pending changes, and open the underlying file in the other tab.
-    await request({ kind })
+    await request({ kind, preserveBoard: true })
     return
   }
   if (api?.getAppState().editingTextElement) {
@@ -128,11 +157,11 @@ function changeMode() {
   }
 }
 
-function install(scene: Scene) {
+function install(scene: Scene, sourceLinks?: Readonly<Record<string, string>>) {
   const old = api?.getAppState()
   const persisted = scene.appState ?? {}
   initial = {
-    elements: scene.elements as unknown as ExcalidrawInitialDataState['elements'],
+    elements: displayElements(scene.elements, sourceLinks) as unknown as ExcalidrawInitialDataState['elements'],
     files: scene.files as ExcalidrawInitialDataState['files'],
     appState: {
       ...(typeof persisted.viewBackgroundColor === 'string' ? { viewBackgroundColor: persisted.viewBackgroundColor } : {}),
@@ -144,14 +173,83 @@ function install(scene: Scene) {
   api = undefined
   baseline = undefined
   diff = createSceneDiff(scene.elements.map(element => element.id))
+  queuedImports.length = 0
+  pendingImages.clear()
+  imageNotice = undefined
   mount++
+}
+
+function importImages(files: File[], point: { clientX: number; clientY: number }) {
+  if (!enabled || !editing || !api || issue || api.getAppState().editingTextElement) return
+  if (files.some(file => !Object.hasOwn(importedImageTypes, file.type))
+    || files.reduce((bytes, file) => bytes + file.size, 0) > imageImportLimit) {
+    imageNotice = words.imageTypes
+    render()
+    return
+  }
+  const editor = api
+  const { x, y } = viewportCoordsToSceneCoords(point, editor.getAppState())
+  imageNotice = undefined
+  // Handle only raster images here. The SDK's file-drop path can replace the
+  // entire scene when a PNG carries Excalidraw export metadata.
+  importFlight = importFlight.then(async () => {
+    const bitmaps = await Promise.all(files.map(async (file, index) => {
+      const dataURL = await new Promise<BinaryFileData['dataURL']>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result as BinaryFileData['dataURL'])
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(file)
+      })
+      const image = new Image()
+      image.src = dataURL
+      await image.decode()
+      const id = crypto.randomUUID().replaceAll('-', '') as BinaryFileData['id']
+      const scale = Math.min(1, 480 / Math.max(image.naturalWidth, image.naturalHeight))
+      const data: BinaryFileData = { id, dataURL, mimeType: file.type as keyof typeof importedImageTypes, created: Date.now() }
+      return {
+        data,
+        shape: { type: 'image' as const, fileId: id, status: 'saved' as const,
+          x: x + index * 24, y: y + index * 24, width: image.naturalWidth * scale, height: image.naturalHeight * scale },
+      }
+    }))
+    if (!enabled || !editing || api !== editor || issue) return
+    queuedImports.push({
+      files: bitmaps.map(bitmap => bitmap.data),
+      elements: convertToExcalidrawElements(bitmaps.map(bitmap => bitmap.shape)),
+    })
+    schedule()
+  }).catch(error => {
+    console.error(error)
+    if (api === editor) {
+      imageNotice = words.imageFailed
+      render()
+    }
+  })
 }
 
 function bind(next: ExcalidrawImperativeAPI) {
   api = next
 }
 
-window.addEventListener('message', ({ data }: MessageEvent<Message>) => {
+function applyState(data: State, cards: typeof pdfCards = {}) {
+  if (!data.force && (flight || hasChanges())) {
+    // Resuming the addon on the same document revision must not replace a draft.
+    if (data.version !== revision) issue = 'conflict'
+    else schedule()
+  } else {
+    pdfCards = cards
+    const first = !doc?.scene
+    doc = data
+    issue = undefined
+    revision = data.version
+    if (data.scene) install(data.scene, data.references?.imageLinks)
+    if (first || data.force || !data.scene) editing = false
+  }
+}
+
+window.addEventListener('message', ({ data, origin }: MessageEvent<Message>) => {
+  // VS Code's outer webview relays on this origin. A sandboxed child has an opaque origin.
+  if (origin !== window.origin || origin === 'null' || !data) return
   switch (data.kind) {
     case 'result': {
       const resolve = waiting.get(data.id)
@@ -162,24 +260,36 @@ window.addEventListener('message', ({ data }: MessageEvent<Message>) => {
     case 'status':
       dirty = data.dirty
       break
-    case 'state':
+    case 'web-policy':
+      permittedWebOrigins = new Set(data.origins)
+      break
+    case 'state': {
       if (data.enabled && !data.force && data.version < revision) return
+      incomingState?.abort()
+      const incoming = incomingState = new AbortController()
       enabled = data.enabled
       dirty = data.dirty
       if (!enabled) break
-      if (!data.force && (flight || hasChanges())) {
-        // Resuming the addon on the same document revision must not replace a draft.
-        if (data.version !== revision) issue = 'conflict'
-        else schedule()
-      } else {
-        const first = !doc?.scene
-        doc = data
-        issue = undefined
-        revision = data.version
-        if (data.scene) install(data.scene)
-        if (first || data.force || !data.scene) editing = false
+      const { scene, references } = data
+      const pdfs = Object.fromEntries(Object.entries(references?.cards ?? {}).filter(
+        (entry): entry is [string, Extract<NonNullable<typeof entry[1]>, { kind: 'pdf' }>] => entry[1]?.kind === 'pdf'))
+      if (scene && references && (Object.keys(references.images).length || Object.keys(pdfs).length)) {
+        const rootUrl = new URL('./', import.meta.url).href
+        void Promise.all([
+          renderReferenceImages(references.images, references.pdfs, rootUrl, incoming.signal),
+          renderReferenceImages(pdfs, references.pdfs, rootUrl, incoming.signal),
+        ])
+          .then(([images, cards]) => {
+            if (incoming.signal.aborted || (!data.force && data.version < revision)) return
+            applyState({ ...data, scene: { ...scene, files: { ...scene.files, ...images.files } },
+              references: { ...references, images: {}, pdfs: {} }, missing: [...data.missing, ...images.missing] }, cards.files)
+            render()
+          })
+        break
       }
+      applyState(data)
       break
+    }
   }
   render()
 })
@@ -217,6 +327,25 @@ const onChange = (_elements: readonly unknown[], state: AppState) => {
   schedule(state)
 }
 
+function WebCard({ url, canPreview, interactive }: { url: URL; canPreview: boolean; interactive: boolean }) {
+  const [opened, setOpened] = useState(false)
+  return <section className="board-reference board-web-reference" data-web-origin={url.origin}>
+    <header className="board-web-header">
+      <strong>{url.host}</strong>
+      <div className="board-web-actions" onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
+        <button type="button" disabled={!interactive}
+          onClick={() => bridge.postMessage({ kind: 'link', link: url.href })}>{words.openWebsite}</button>
+        {canPreview && <button type="button" disabled={!interactive}
+          onClick={() => setOpened(!opened)}>{opened ? words.hideWebPreview : words.loadWebPreview}</button>}
+      </div>
+    </header>
+    {canPreview && opened
+      ? <iframe title={url.host} src={url.href} sandbox="allow-scripts" referrerPolicy="no-referrer"
+          style={{ pointerEvents: interactive ? 'auto' : 'none' }} />
+      : <p>{url.pathname}{url.search}{url.hash}</p>}
+  </section>
+}
+
 function render() {
   const usable = !!doc?.scene && enabled
   const failed = enabled === false ? words.disabled : issue ? words[issue] : doc && !doc.scene ? words.badFile : undefined
@@ -245,15 +374,32 @@ function render() {
       <span>{failed}</span>
       {enabled && issue && <button onClick={() => bridge.postMessage({ kind: 'reload' })}>{words.reload}</button>}
     </div>}
+    {usable && !failed && imageNotice && <div className="board-notice" role="status">{imageNotice}</div>}
     {usable && !failed && doc!.missing.length > 0 && <div className="board-notice" role="status">
       {words.missing} {doc!.missing.join(', ')}
     </div>}
-    <main className="board-canvas" onDropCapture={event => {
-      if (event.dataTransfer.files.length) {
+    <main className="board-canvas"
+      onDragOverCapture={event => {
+        if (event.dataTransfer.types.includes('Files')) {
+          event.preventDefault()
+          event.dataTransfer.dropEffect = editing && enabled ? 'copy' : 'none'
+        }
+      }}
+      onDropCapture={event => {
+        const files = Array.from(event.dataTransfer.files)
+        if (!files.length) return
         event.preventDefault()
         event.stopPropagation()
-      }
-    }}>
+        importImages(files, { clientX: event.clientX, clientY: event.clientY })
+      }}
+      onPasteCapture={event => {
+        const files = Array.from(event.clipboardData.files)
+        if (!files.length || api?.getAppState().editingTextElement) return
+        event.preventDefault()
+        event.stopPropagation()
+        const box = event.currentTarget.getBoundingClientRect()
+        importImages(files, { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 })
+      }}>
       {!doc && enabled !== false && <p role="status">{words.loading}</p>}
       {doc?.scene && <Excalidraw key={mount} initialData={initial} excalidrawAPI={bind}
         langCode={locale.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en'}
@@ -263,9 +409,31 @@ function render() {
           event.preventDefault()
           if (element.link) bridge.postMessage({ kind: 'link', link: element.link })
         }}
-        onPaste={(data, event) => !event?.clipboardData?.files.length
-          && !data.elements?.some(element => element.type === 'image')}
-        validateEmbeddable={false}
+        onPaste={(data, event) => !event?.clipboardData?.files.length && canPasteSceneElements(data.elements)}
+        onDuplicate={elements => elements.map(projectCanvasElement)}
+        validateEmbeddable={link => !!webLink(link) || (doc?.scene?.elements.some(element => element.link === link
+          && Object.hasOwn(doc?.references?.cards ?? {}, element.id)) ?? false)}
+        renderEmbeddable={element => {
+          const link = element.link ?? ''
+          const url = webLink(link)
+          if (url) {
+            const canPreview = !!enabled && permittedWebOrigins.has(url.origin)
+            return <WebCard key={url.href + ':' + canPreview} url={url} canPreview={canPreview} interactive={!!enabled && !editing} />
+          }
+          const reference = doc?.references?.cards[element.id]
+          const label = link.slice(2, -2).split('|', 1)[0]
+          return <section className="board-reference">
+            <button type="button" aria-label={words.openSource + label} disabled={!enabled || editing}
+              onPointerDown={event => event.stopPropagation()}
+              onClick={event => {
+                event.stopPropagation()
+                bridge.postMessage({ kind: 'link', link })
+              }}>{label}</button>
+            {reference?.kind === 'note' ? <div className="board-reference-text" dangerouslySetInnerHTML={{ __html: reference.html }} />
+              : pdfCards[element.id] ? <img src={pdfCards[element.id].dataURL} alt={label} />
+                : <p>{words.referenceUnavailable}</p>}
+          </section>
+        }}
         UIOptions={{ tools: { image: false }, canvasActions: {
           changeViewBackgroundColor: false, clearCanvas: false, loadScene: false, saveToActiveFile: false,
           export: false, saveAsImage: false, toggleTheme: false,

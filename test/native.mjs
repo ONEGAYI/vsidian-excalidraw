@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -10,7 +10,7 @@ import { newDrawing, readDrawing } from '../src/format.ts'
 
 const [stage, sessionPath, vsidianSource, vscodeExe, vsidianExtension, obsidianExe, pluginSource, installedAddon] = process.argv.slice(2)
 if (!stage || !sessionPath || !vsidianSource || !vscodeExe || !vsidianExtension || !obsidianExe || !pluginSource) {
-  throw new Error('Usage: node test/native.mjs <seed|vscode|reopen|create|new> <session-dir> <Vsidian-source> <Code.exe> <Vsidian-extension> <Obsidian.exe> <Obsidian-plugin-dir> [addonDir]')
+  throw new Error('Usage: node test/native.mjs <stage> <session-dir> <Vsidian-source> <Code.exe> <Vsidian-extension> <Obsidian.exe> <Obsidian-plugin-dir> [addonDir]')
 }
 const { runTestHost, buildTestHostArgs } = await import(pathToFileURL(path.resolve(vsidianSource, 'test/integration/testHost.mjs')))
 const addon = installedAddon ?? fileURLToPath(new URL('..', import.meta.url))
@@ -23,6 +23,26 @@ const linkedLabel = 'Original [[Readme|Label]]'
 const editedLinkedLabel = linkedLabel.replace('Original', 'Edited in Vsidian')
 const invariant = 'Original note content — 画板往返'
 const asset = 'assets/reference.svg'
+const gallery = 'Gallery.md'
+const gallerySource = '# Drawing gallery\n\n![[Compressed.excalidraw]]\n\n![[Plain]]\n\n![[Readme]]\n'
+const incomplete = 'Incomplete.excalidraw.md'
+const incompleteHeading = 'A drawing without scene data'
+const incompleteSource = '---\nexcalidraw-plugin: parsed\n---\n\n# ' + incompleteHeading + '\n'
+const incompleteGallery = 'Incomplete reference.md'
+const localBoard = 'Local references.excalidraw.md'
+const localNote = 'Reference.md'
+const localPdf = 'assets/pages.pdf'
+const slowImageBoard = 'Slow image writes.excalidraw.md'
+const sectionMarker = 'Northern section marker'
+const blockMarker = 'Portable block marker'
+const referencesNote = '# Remote section\n\nDo not show this section\n\n## Selected section\n\n**' + sectionMarker +
+  '**\n\n## Example block\n\n' + blockMarker + ' ^portable-block\n\nDo not show this other paragraph\n'
+const webBoard = 'Web references.excalidraw.md'
+const webAllowed = 'https://allowed.preview.test'
+const webDenied = 'https://frame-denied.preview.test'
+const webBlocked = 'https://not-allowed.preview.test'
+const webInsecure = 'http://allowed.preview.test'
+const webTargets = [webAllowed, webDenied, webBlocked, webInsecure]
 
 async function retry(probe, reason, timeout = 30_000) {
   const end = Date.now() + timeout
@@ -180,12 +200,94 @@ if (stage === 'seed') {
       console.log('PASS: Obsidian generated', file, scene.payload.kind, expected)
     }
   })
-} else if (stage === 'vscode' || stage === 'create') {
-  if (stage === 'vscode') for (const file of cases) await cp(path.join(session, file + '.original'), path.join(vault, file))
+} else if (stage === 'references-seed') {
+  await writeFile(path.join(vault, localNote), referencesNote)
+  await writeFile(path.join(vault, localPdf), fixturePdf())
+  let seeded
+  await obsidian(async page => {
+    await page.evaluate(id => app.plugins.plugins[id]
+      .openDrawing(app.vault.getFileByPath('Warmup.excalidraw.md'), 'active-pane', true), pluginId)
+    await page.waitForFunction(() => app.workspace.activeLeaf?.view?._loaded &&
+      app.workspace.activeLeaf.view.file?.path === 'Warmup.excalidraw.md', undefined, { timeout: 14000 })
+    seeded = await page.evaluate(async ({ board, note, pdf, pluginId }) => {
+        const plugin = app.plugins.plugins[pluginId]
+        plugin.settings.compress = true
+        const ea = plugin.ea
+        ea.reset()
+        ea.setView('active')
+        const file = app.vault.getFileByPath(note)
+        const section = ea.addEmbeddable(0, 0, 360, 155, undefined, file)
+        const block = ea.addEmbeddable(390, 0, 360, 155, undefined, file)
+        ea.getElement(section).link = '[[' + note + '#Selected section]]'
+        ea.getElement(block).link = '[[' + note + '#^portable-block]]'
+        const image = await ea.addImage(40, 190, pdf + '#page=2')
+        if (!image) throw new Error('Obsidian did not insert the PDF page')
+        const chart = await ea.create({ filename: board.replace(/\.md$/, ''), foldername: '', onNewPane: false })
+        if (chart !== board) await app.fileManager.renameFile(app.vault.getFileByPath(chart), board)
+        return { section, block, image }
+    }, { board: localBoard, note: localNote, pdf: localPdf, pluginId })
+  })
+  const source = await readFile(path.join(vault, localBoard), 'utf8')
+  const drawing = readDrawing(source)
+  const pdf = drawing.scene.elements.find(el => el.id === seeded.image)
+  assert.equal(drawing.scene.elements.find(el => el.id === seeded.section).link, '[[' + localNote + '#Selected section]]')
+  assert.equal(drawing.scene.elements.find(el => el.id === seeded.block).link, '[[' + localNote + '#^portable-block]]')
+  assert(drawing.attachments.get(pdf.fileId)?.includes(localPdf + '#page=2'))
+  console.log('PASS: official Obsidian plugin produced two note selectors and a PDF page image', seeded)
+  await writeFile(path.join(session, localBoard + '.references-original'), source)
+} else if (stage === 'web-seed') {
+  await obsidian(async page => {
+    await page.context().route(/https?:\/\/[^/]+\.preview\.test\//, route => route.abort())
+    await page.evaluate(id => app.plugins.plugins[id]
+      .openDrawing(app.vault.getFileByPath('Warmup.excalidraw.md'), 'active-pane', true), pluginId)
+    await page.waitForFunction(() => app.workspace.activeLeaf?.view?._loaded &&
+      app.workspace.activeLeaf.view.file?.path === 'Warmup.excalidraw.md', undefined, { timeout: 14000 })
+    await page.evaluate(async ({ board, targets, id }) => {
+      const plugin = app.plugins.plugins[id]
+      plugin.settings.compress = false
+      const ea = plugin.ea
+      ea.reset()
+      ea.setView('active')
+      for (const [i, origin] of targets.entries()) ea.addEmbeddable((i % 2) * 222, Math.floor(i / 2) * 132, 210, 116, origin + '/page')
+      const raw = ea.getElement(ea.addRect(0, 270, 180, 65))
+      raw.type = 'iframe'
+      raw.customData = { generationData: { status: 'done', html: '<p>RAW_FRAME_CONTENT_MUST_NOT_MOUNT</p>' } }
+      const chart = await ea.create({ filename: board.replace(/\.excalidraw\.md$/, ''), foldername: '', onNewPane: false })
+      if (chart !== board) await app.fileManager.renameFile(app.vault.getFileByPath(chart), board)
+    }, { board: webBoard, targets: webTargets, id: pluginId })
+  })
+  const source = await readFile(path.join(vault, webBoard), 'utf8')
+  const contents = readDrawing(source)
+  assert.deepEqual(contents.scene.elements.filter(e => e.type === 'embeddable').map(e => e.link), webTargets.map(origin => origin + '/page'))
+  assert(contents.stored.elements.some(e => e.type === 'iframe' && e.customData.generationData.html.includes('RAW_FRAME_CONTENT')))
+  await writeFile(path.join(session, webBoard + '.web-original'), source)
+  console.log('PASS: Obsidian created actual URL elements and an HTML frame in a plain graph')
+} else if (['vscode', 'view-selection-vscode', 'create', 'image-import', 'image-batches', 'image-return', 'preview-vscode', 'references-vscode', 'web-vscode'].includes(stage)) {
+  if (stage === 'image-batches') {
+    await mkdir(vault, { recursive: true })
+    await writeFile(path.join(vault, slowImageBoard), newDrawing())
+  }
+  if (stage === 'preview-vscode') await writeFile(path.join(vault, gallery), gallerySource)
+  if (stage === 'preview-vscode') {
+    for (const file of cases) await cp(path.join(session, file + '.with-import'), path.join(vault, file))
+    const formats = await Promise.all(cases.map(async file => readDrawing(await readFile(path.join(vault, file), 'utf8')).payload.kind))
+    assert.deepEqual(formats, ['compressed-json', 'json'], 'A two-format preview test requires one drawing of each encoding')
+    await writeFile(path.join(vault, incompleteGallery), '# Reference fallback\n\n![[Incomplete.excalidraw]]\n')
+  }
+  if (['vscode', 'view-selection-vscode', 'image-import'].includes(stage)) {
+    for (const file of cases) await cp(path.join(session, file + '.original'), path.join(vault, file))
+  }
+  if (stage === 'vscode' || stage === 'preview-vscode') await writeFile(path.join(vault, incomplete), incompleteSource)
+  if (stage === 'vscode') {
+    await writeFile(path.join(vault, 'Tagged.excalidraw.md'), '---\ntags: [excalidraw]\n---\n\n# A note about Excalidraw\n')
+  }
   const scope = path.join(session, stage + '-user')
   await mkdir(path.join(scope, 'User'), { recursive: true })
   await writeFile(path.join(scope, 'User', 'settings.json'), JSON.stringify({
-    'workbench.startupEditor': 'none', 'window.zoomLevel': 0, 'security.workspace.trust.enabled': false,
+    'workbench.startupEditor': 'none',
+    // A narrow Excalidraw view only opens links from their icons, not the artwork.
+    'window.zoomLevel': stage === 'references-vscode' ? -1 : 0,
+    'security.workspace.trust.enabled': false,
     'window.restoreWindows': 'none', 'files.autoSave': 'off', 'workbench.colorTheme': 'Default Light Modern',
     'files.simpleDialog.enable': true,
   }))
@@ -199,12 +301,86 @@ if (stage === 'seed') {
     page.on('pageerror', error => console.error('[workbench]', error.message))
     await vscodeFlow(page)
   }, { VSED_SESSION: session, VSED_RUN: runId, VSIDIAN_TEST_HOOKS: '1' })
-} else if (stage === 'reopen' || stage === 'new') {
+} else if (stage === 'preview-obsidian') {
+  await obsidian(async page => {
+    await page.evaluate(async file => {
+      const leaf = app.workspace.getLeaf(false)
+      await leaf.openFile(app.vault.getFileByPath(file), { state: { mode: 'preview' } })
+    }, gallery)
+    const draws = page.locator('.markdown-preview-view .excalidraw-embedded-img')
+    for (let i = 0; i < cases.length; i++) await draws.nth(i).waitFor({ state: 'visible', timeout: 15000 }).catch(async error => {
+      console.error('Obsidian embeds:', await page.locator('.markdown-preview-view').evaluateAll(views =>
+        views.map(view => ({ text: view.textContent?.slice(0, 350), embeds: [...view.querySelectorAll('.internal-embed, [class*="excalidraw"]')]
+          .map(el => [el.tagName, el.className, el.getAttribute('src')?.slice(0, 100)]).slice(0, 16) }))))
+      throw error
+    })
+    assert.equal(await draws.count(), cases.length)
+    for (let i = 0; i < cases.length; i++) {
+      const count = await draws.nth(i).locator('svg:visible, img:visible, canvas:visible').count()
+        + Number(await draws.nth(i).evaluate(el => el.matches('img,svg,canvas')))
+      assert(count > 0, 'Obsidian did not render an image for ' + cases[i])
+    }
+    await page.getByText('Normal Markdown', { exact: true }).waitFor({ state: 'visible', timeout: 10000 })
+    await page.screenshot({ path: path.join(session, 'obsidian-gallery.png') })
+    assert.equal(await readFile(path.join(vault, gallery), 'utf8'), gallerySource)
+    console.log('PASS: Obsidian reads both unchanged wiki-embeds from the same Markdown note')
+  })
+} else if (stage === 'references-obsidian') {
+  const source = await readFile(path.join(vault, localBoard), 'utf8')
+  await obsidian(async page => {
+    await page.evaluate(({ pluginId, file }) => app.plugins.plugins[pluginId]
+      .openDrawing(app.vault.getFileByPath(file), 'active-pane', true), { pluginId, file: localBoard })
+    const activeId = await page.waitForFunction(file =>
+      app.workspace.activeLeaf?.view?.file?.path === file &&
+      app.workspace.activeLeaf.view.excalidrawAPI?.getSceneElements().some(el => el.type === 'rectangle'),
+    localBoard, { timeout: 12000 })
+    assert(activeId)
+    await retry(() => page.evaluate(hasSecondPdfPage), 'Obsidian did not paint the referenced second PDF page')
+    await page.getByText(sectionMarker, { exact: true }).waitFor({ state: 'visible', timeout: 12000 })
+    await page.getByText(blockMarker, { exact: true }).waitFor({ state: 'visible', timeout: 12000 })
+    await page.screenshot({ path: path.join(session, 'obsidian-local-references.png') })
+  })
+  assert.equal(await readFile(path.join(vault, localBoard), 'utf8'), source)
+  assert.equal(await readFile(path.join(vault, localNote), 'utf8'), referencesNote)
+  assert((await readFile(path.join(vault, localPdf))).equals(fixturePdf()))
+  console.log('PASS: Obsidian paints both note selectors and PDF page 2 after a Vsidian edit')
+} else if (stage === 'web-obsidian') {
+  const original = readDrawing(await readFile(path.join(session, webBoard + '.web-original'), 'utf8'))
+  await cp(path.join(session, webBoard + '.web-from-vsidian'), path.join(vault, webBoard))
+  await obsidian(async page => {
+    await page.context().route(/https?:\/\/[^/]+\.preview\.test\//, route => route.abort())
+    await page.evaluate(({ id, file }) => {
+      const plugin = app.plugins.plugins[id]
+      plugin.settings.compress = false
+      return plugin.openDrawing(app.vault.getFileByPath(file), 'active-pane', true)
+    }, { id: pluginId, file: webBoard })
+    const expected = original.scene.elements.filter(element => element.type === 'embeddable').map(el => el.link)
+    await page.waitForFunction(({ file, expected }) => {
+      const view = app.workspace.activeLeaf?.view
+      if (view?.file?.path !== file || !view.excalidrawAPI) return false
+      const elements = view.excalidrawAPI.getSceneElements()
+      return elements.some(el => el.type === 'rectangle') &&
+        expected.every(link => elements.some(el => el.type === 'embeddable' && el.link === link))
+    }, { file: webBoard, expected }, { timeout: 12000 })
+    await page.screenshot({ path: path.join(session, 'obsidian-web-references.png') })
+  })
+  const reopened = readDrawing(await readFile(path.join(vault, webBoard), 'utf8'))
+  // The official plugin normalizes indices, element versions and the default scale on open.
+  // Vsidian's own byte-for-byte preservation is checked before handing the file back.
+  const portable = ({ index, updated, version, versionNonce, scale = [1, 1], ...element }) => ({ ...element, scale })
+  for (const el of original.stored.elements) assert.deepEqual(portable(reopened.stored.elements.find(e => e.id === el.id)), portable(el))
+  assert.equal(reopened.payload.kind, original.payload.kind)
+  console.log('PASS: Obsidian reopened Vsidian’s edit with all original URLs and frame data intact')
+} else if (stage === 'reopen' || stage === 'new' || stage === 'image-reopen') {
   const selected = stage === 'new' ? ['Drawing.excalidraw.md'] : cases
-  for (const file of selected) await cp(path.join(session, file + '.from-vsidian'), path.join(vault, file))
+  for (const file of selected) {
+    const suffix = stage === 'image-reopen' ? '.with-import' : '.from-vsidian'
+    await cp(path.join(session, file + suffix), path.join(vault, file))
+  }
   await obsidian(async page => {
     for (const file of selected) {
       const expectedText = stage === 'new' ? 'Created in Vsidian · 双平台'
+        : stage === 'image-reopen' ? file === cases[0] ? linkedLabel : 'Original Label'
         : file === cases[0] ? editedLinkedLabel : 'Edited in Vsidian'
       await page.evaluate(file => {
         const plugin = app.plugins.plugins['obsidian-excalidraw-plugin']
@@ -241,14 +417,16 @@ if (stage === 'seed') {
         })), files: Object.keys(view.excalidrawAPI.getFiles()) }
       })
       assert.equal(snapshot.type, 'excalidraw')
-      if (stage === 'reopen') {
+      if (stage === 'reopen' || stage === 'image-reopen') {
         const saved = readDrawing(await readFile(path.join(vault, file), 'utf8'))
         assert.deepEqual(snapshot.elements.map(e => e.id).sort(), saved.scene.elements.filter(e => !e.isDeleted).map(e => e.id).sort())
         assert(snapshot.elements.some(e => e.type === 'text' && e.text === expectedText))
         assert.equal(snapshot.elements.length, 4)
-        const imageId = snapshot.elements.find(e => e.type === 'image').fileId
-        await page.waitForFunction(id => id in app.workspace.activeLeaf.view.excalidrawAPI.getFiles(), imageId, { polling: 100 })
-        await retry(() => page.evaluate(readPaint), 'Obsidian did not paint the chart and linked image after reopening')
+        const imageIds = snapshot.elements.filter(e => e.type === 'image').map(e => e.fileId)
+        assert.equal(imageIds.length, stage === 'image-reopen' ? 2 : 1)
+        await page.waitForFunction(ids => ids.every(id => id in app.workspace.activeLeaf.view.excalidrawAPI.getFiles()),
+          imageIds, { polling: 100 })
+        await retry(() => page.evaluate(readPaint, stage === 'image-reopen'), 'Obsidian did not paint the chart and linked images after reopening')
       } else {
         assert(snapshot.elements.some(e => e.type === 'text' && e.text === 'Created in Vsidian · 双平台'))
       }
@@ -272,6 +450,9 @@ if (stage === 'seed') {
         return saved.scene.elements.some(element => element.id === continued && element.type === 'ellipse') && saved
       }, 'Obsidian could not continue editing ' + file)
       assert(result.scene.elements.length >= snapshot.elements.length + 1)
+      if (stage === 'image-reopen') {
+        for (const { fileId } of snapshot.elements.filter(element => element.type === 'image')) assert(result.attachments.has(fileId))
+      }
       console.log('PASS: Obsidian continued editing and saved the same file', file)
     }
   })
@@ -284,17 +465,18 @@ async function vscodeFlow(page) {
   const ready = await retry(() => readJson(path.join(session, prefix + '-ready')), 'VS Code did not activate the two extensions')
   console.log('VS Code ' + ready.vscode + ' / Vsidian ' + ready.vsidian)
   let requestNo = 0
-  const command = async (action, name) => {
+  const command = async (action, name, value) => {
     const id = ++requestNo
     const request = path.join(session, prefix + '-req-' + id)
-    await writeFile(request + '.tmp', JSON.stringify({ action, name }))
+    await writeFile(request + '.tmp', JSON.stringify({ action, name, value }))
     await rename(request + '.tmp', request)
     return retry(() => readJson(path.join(session, prefix + '-res-' + id)), 'VS Code did not acknowledge ' + action + ' ' + name)
   }
   const hasView = async (view, file) => retry(async () => {
     const snapshot = await command('snapshot', file)
-    return snapshot.active === view && snapshot
-  }, 'VS Code did not activate ' + view)
+    return snapshot.active === view && snapshot.activePath &&
+      path.relative(snapshot.activePath, path.join(vault, file)) === '' && snapshot
+  }, 'VS Code did not activate ' + view + ' for ' + file, 10_000)
   const frameWith = (locator) => retry(async () => {
     for (const frame of page.frames()) {
       if (!await frame.locator(locator).first().isVisible()) continue
@@ -313,17 +495,484 @@ async function vscodeFlow(page) {
   const markdownView = 'onegayi.vsidian.editor'
   const boardView = 'onegayi.vsidian-excalidraw.board'
 
+  if (stage === 'view-selection-vscode') {
+    const file = cases[1]
+    await command('default', file)
+    await hasView(boardView, file)
+    const originalBoard = await frameWith('.board-toolbar')
+    await retry(() => originalBoard.evaluate(readPaint), 'The default view did not paint the drawing')
+    await command('source-beside', file)
+    await page.getByRole('button', { name: /Switch Vsidian to live preview/i }).click({ timeout: 5000 })
+    await hasView(markdownView, file)
+    const markdown = await frameWith('.cm-content')
+    await markdown.getByText(invariant, { exact: true }).first().waitFor({ state: 'visible', timeout: 5000 })
+    await hasView(markdownView, file)
+    assert.deepEqual((await command('group-views')).views, [boardView, markdownView])
+    await page.getByRole('button', { name: /Open in Excalidraw Board/ }).click({ timeout: 5000 })
+    await hasView(boardView, file)
+    await command('reopen-with')
+    await page.locator('.quick-input-widget').getByLabel('Vsidian', { exact: true }).click({ timeout: 5000 })
+    await hasView(markdownView, file)
+    await (await frameWith('.cm-content')).getByText(invariant, { exact: true }).first().waitFor({ state: 'visible', timeout: 5000 })
+    assert.deepEqual((await command('group-views')).views, [boardView, markdownView])
+    await command('close-left-group')
+    await hasView(markdownView, file)
+    await (await frameWith('.cm-content')).getByText(invariant, { exact: true }).first().waitFor({ state: 'visible', timeout: 5000 })
+    assert.deepEqual((await command('group-views')).views, [markdownView])
+    await command('close-active')
+    await command('default', file)
+    await hasView(boardView, file)
+    await command('stop')
+    console.log('PASS: both explicit Markdown entries leave the other group on its board')
+    return
+  }
+
+  if (stage === 'web-vscode') {
+    const original = await readFile(path.join(session, webBoard + '.web-original'), 'utf8')
+    await writeFile(path.join(vault, webBoard), original)
+    const requests = []
+    await page.context().route(/https?:\/\/[^/]+\.preview\.test\//, route => {
+      const target = new URL(route.request().url())
+      requests.push(target.href)
+      if (target.origin === webDenied) return route.abort('blockedbyresponse')
+      return route.fulfill({ status: 200, contentType: 'text/html',
+        body: '<meta charset="utf-8"><h1>Sandboxed page loaded</h1>' })
+    })
+    await command('web-policy-set', undefined, [])
+    await command('board', webBoard)
+    await hasView(boardView, webBoard)
+    let frame = await frameWith('.board-toolbar')
+    const card = origin => frame.locator('section[data-web-origin="' + origin + '"]')
+    const open = (origin) => card(origin).getByRole('button', { name: 'Open in browser', exact: true })
+    const load = (origin) => card(origin).getByRole('button', { name: 'Load preview', exact: true })
+    for (const origin of webTargets) {
+      await open(origin).waitFor({ state: 'visible', timeout: 6000 })
+      assert.equal(await load(origin).count(), 0)
+    }
+    assert.equal(await frame.locator('.excalidraw iframe').count(), 0)
+    assert.deepEqual(requests, [])
+    console.log('PASS: default link cards and raw HTML generate no web requests')
+    const policy = [webAllowed, webDenied]
+    const stored = await command('web-policy-set', undefined, policy)
+    assert.equal(stored.outcome?.ok, true, JSON.stringify(stored))
+    assert.deepEqual((await command('web-policy-get')).values.webPreviewOrigins, policy)
+    await command('web-policy-show')
+    const settings = await frameWith('.vsidian-settings-sidebar')
+    await settings.locator('.vsidian-settings-sidebar').getByRole('button', { name: 'Vsidian Excalidraw', exact: true }).click({ timeout: 6000 })
+    await settings.getByText('Allowed web preview origins', { exact: true }).waitFor({ state: 'visible', timeout: 5000 })
+    assert.deepEqual(await settings.locator('.vsidian-addons-array input').evaluateAll(inputs => inputs.map(input => input.value)), policy)
+    await command('web-policy-close')
+    await command('board', webBoard)
+    await command('close-active')
+    await command('board', webBoard)
+    await hasView(boardView, webBoard)
+    frame = await frameWith('.board-toolbar')
+    for (const origin of policy) await load(origin).waitFor({ state: 'visible', timeout: 6000 })
+    for (const origin of [webBlocked, webInsecure]) assert.equal(await load(origin).count(), 0)
+    assert.deepEqual(requests, [])
+    await load(webAllowed).click()
+    const allowed = card(webAllowed).locator('iframe')
+    assert.equal(await allowed.getAttribute('sandbox'), 'allow-scripts')
+    assert.equal(await allowed.getAttribute('referrerpolicy'), 'no-referrer')
+    const sandboxedPage = card(webAllowed).frameLocator('iframe').getByText('Sandboxed page loaded', { exact: true })
+    await sandboxedPage.waitFor({ state: 'visible', timeout: 10000 })
+    const child = page.frames().find(candidate => candidate.url() === webAllowed + '/page')
+    assert(child)
+    await child.evaluate(() => parent.postMessage({ kind: 'web-policy', origins: [] }, '*'))
+    assert(await sandboxedPage.isVisible(), 'A child preview must not be able to alter the board policy')
+    await Promise.all([
+      page.waitForEvent('requestfailed', { predicate: request => request.url() === webDenied + '/page', timeout: 5000 }),
+      load(webDenied).click(),
+    ])
+    await open(webDenied).waitFor({ state: 'visible', timeout: 5000 })
+    assert(await sandboxedPage.isVisible(), 'A child preview must not be able to alter the board policy')
+    assert.deepEqual([...new Set(requests)].sort(), policy.map(origin => origin + '/page').sort())
+    await page.screenshot({ path: path.join(session, 'vscode-web-references.png') })
+    await command('web-policy-set', undefined, [])
+    await retry(async () => await frame.locator('.excalidraw iframe').count() === 0, 'Revoking the allowlist did not close the embedded pages')
+    console.log('PASS: allowlisted HTTPS opt-in loads a sandboxed page, denied framing retains a browser fallback, and revocation unloads previews')
+    const toolbar = frame.locator('.board-toolbar')
+    await toolbar.getByRole('button', { name: 'Edit drawing', exact: true }).click()
+    const bounds = await frame.locator('.excalidraw').boundingBox()
+    assert(bounds)
+    const x = bounds.x + bounds.width - 105, y = bounds.y + 125
+    await page.mouse.click(x, y)
+    await page.keyboard.press('r')
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.move(x + 40, y + 52, { steps: 5 })
+    await page.mouse.up()
+    const save = toolbar.getByRole('button', { name: 'Save', exact: true })
+    await retry(() => save.isEnabled(), 'The new shape could not be saved')
+    await save.click()
+    const saved = await retry(async () => {
+      const drawing = readDrawing(await readFile(path.join(vault, webBoard), 'utf8'))
+      return drawing.stored.elements.some(e => e.type === 'rectangle') && drawing
+    }, 'The web drawing edit was not saved')
+    for (const el of readDrawing(original).stored.elements) assert.deepEqual(saved.stored.elements.find(e => e.id === el.id), el)
+    assert.equal(saved.payload.kind, 'json')
+    await cp(path.join(vault, webBoard), path.join(session, webBoard + '.web-from-vsidian'))
+    console.log('PASS: saving beside web cards preserved the original URL and raw HTML metadata')
+    await command('stop')
+    return
+  }
+
+  if (stage === 'references-vscode') {
+    const original = await readFile(path.join(session, localBoard + '.references-original'), 'utf8')
+    await writeFile(path.join(vault, localBoard), original)
+    const before = readDrawing(original)
+    await command('board', localBoard)
+    await hasView(boardView, localBoard)
+    let frame = await frameWith('.board-toolbar')
+    const button = name => frame.locator('.board-toolbar').getByRole('button', { name, exact: true })
+    await frame.getByText(sectionMarker, { exact: true }).waitFor({ state: 'visible', timeout: 6000 })
+    await frame.getByText(blockMarker, { exact: true }).waitFor({ state: 'visible', timeout: 6000 })
+    assert.equal(await frame.getByText(/Do not show this/).filter({ visible: true }).count(), 0)
+    const pdfHit = await retry(() => frame.evaluate(hasSecondPdfPage), 'Vsidian did not paint the referenced second PDF page')
+    await page.screenshot({ path: path.join(session, 'vscode-local-references.png') })
+    console.log('PASS: Vsidian paints both resolved note selections and PDF page 2')
+    const paintedCanvas = frame.locator('.excalidraw canvas').nth(pdfHit.canvas)
+    const pdfCanvas = await paintedCanvas.boundingBox()
+    assert(pdfCanvas, 'The painted PDF canvas was no longer visible')
+    const pdfX = pdfCanvas.x + pdfCanvas.width * pdfHit.x
+    const pdfY = pdfCanvas.y + pdfCanvas.height * pdfHit.y
+    await page.mouse.move(pdfX, pdfY)
+    await retry(() => paintedCanvas.evaluate((canvas, { x, y }) => {
+      const box = canvas.getBoundingClientRect()
+      const hit = document.elementFromPoint(box.left + box.width * x, box.top + box.height * y)
+      return hit && getComputedStyle(hit).cursor === 'pointer'
+    }, pdfHit), 'The painted PDF did not expose a source link at its visible artwork', 4000)
+    await page.mouse.click(pdfX, pdfY)
+    await retry(async () => {
+      const active = await command('active')
+      return active.activePath && path.relative(active.activePath, path.join(vault, localPdf)) === ''
+    }, 'Clicking the PDF preview did not open its original attachment', 6000).catch(async error => {
+      const notices = await page.locator('.notification-toast').allTextContents()
+      console.error('VS Code after following the PDF link:', await command('active'), notices)
+      throw error
+    })
+    await command('board', localBoard)
+    await hasView(boardView, localBoard)
+    frame = await frameWith('.board-toolbar')
+    await frame.getByRole('button', { name: 'Open source: ' + localNote + '#Selected section', exact: true }).click()
+    await hasView(markdownView, localNote)
+    assert.equal((await command('snapshot', localNote)).source, referencesNote)
+    await command('board', localBoard)
+    await hasView(boardView, localBoard)
+    frame = await frameWith('.board-toolbar')
+    await button('Edit drawing').click()
+    const bounds = await frame.locator('.excalidraw').boundingBox()
+    assert(bounds)
+    const x = bounds.x + bounds.width - 150, y = bounds.y + bounds.height - 190
+    await page.mouse.click(x, y)
+    await page.keyboard.press('r')
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.move(x + 50, y + 65, { steps: 6 })
+    await page.mouse.up()
+    await retry(() => button('Save').isEnabled(), 'A new rectangle next to the previews did not become saveable')
+    await button('Save').click()
+    const saved = await retry(async () => {
+      const drawing = readDrawing(await readFile(path.join(vault, localBoard), 'utf8'))
+      return drawing.stored.elements.some(el => el.type === 'rectangle') && drawing
+    }, 'Vsidian did not save the edit alongside the embeds')
+    assert.equal(saved.payload.kind, before.payload.kind)
+    assert.deepEqual(saved.attachments, before.attachments)
+    for (const el of before.stored.elements.filter(e => e.type === 'embeddable' || e.type === 'image')) {
+      assert.deepEqual(saved.stored.elements.find(e => e.id === el.id), el)
+    }
+    assert.deepEqual(saved.stored.files, before.stored.files)
+    assert.equal(await readFile(path.join(vault, localNote), 'utf8'), referencesNote)
+    assert((await readFile(path.join(vault, localPdf))).equals(fixturePdf()))
+    console.log('PASS: opening the source and saving a new shape left each original reference and source file unchanged')
+    await command('stop')
+    return
+  }
+
+  if (stage === 'preview-vscode') {
+    page.on('requestfailed', req => console.error('[preview resource]', req.failure()?.errorText, req.url().slice(0, 420)))
+    const selectLive = async frame => {
+      const toLive = frame.getByRole('button', { name: 'Switch to live preview', exact: true })
+      if (await toLive.isVisible()) await toLive.click({ timeout: 5000 })
+      await frame.getByRole('button', { name: 'Switch to reading view', exact: true }).waitFor({ state: 'visible', timeout: 5000 })
+    }
+    await command('markdown', incompleteGallery)
+    await hasView(markdownView, incompleteGallery)
+    const fallback = await frameWith('.vsidian-view-toggle')
+    await selectLive(fallback)
+    const ordinaryContent = fallback.locator('.vsidian-embed-card').getByText(incompleteHeading).filter({ visible: true })
+    await ordinaryContent.first().waitFor({ state: 'visible', timeout: 5000 })
+    await fallback.getByRole('button', { name: 'Switch to reading view', exact: true }).click()
+    await fallback.locator('.vsidian-view-reading .vsidian-embed-card').getByText(incompleteHeading, { exact: true })
+      .filter({ visible: true }).waitFor({ state: 'visible', timeout: 5000 })
+    assert.equal((await command('snapshot', incomplete)).source, incompleteSource)
+    console.log('PASS: an incomplete drawing is rendered as Markdown in Live and Reading')
+    const sources = await Promise.all(cases.map(name => readFile(path.join(vault, name), 'utf8')))
+    await command('markdown', gallery)
+    await hasView(markdownView, gallery)
+    const frame = await frameWith('.vsidian-view-toggle')
+    await selectLive(frame)
+    for (const [i, mode] of ['Live', 'Reading'].entries()) {
+      const toggle = frame.getByRole('button', { name: i === 0 ? 'Switch to reading view' : 'Switch to live preview', exact: true })
+      const draws = frame.locator('.vsidian-embed-card img[data-excalidraw-preview]:visible')
+      await retry(async () => {
+        if (await draws.count() !== cases.length) return false
+        const painted = await draws.evaluateAll(async images => {
+          return images.map(image => {
+            if (!image.complete || !image.naturalWidth || !image.naturalHeight) return false
+            const canvas = document.createElement('canvas')
+            canvas.width = 240
+            canvas.height = 160
+            const ctx = canvas.getContext('2d')
+            ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+            const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+            let red = 0, blue = 0, green = 0
+            for (let p = 0; p < data.length; p += 4) {
+              const [r,g,b,a] = data.subarray(p, p + 4)
+              if (a > 180 && r > 160 && g < 80 && b < 80) red++
+              if (a > 180 && b > 155 && r < 60 && g > 60 && g < 125) blue++
+              if (a > 180 && g > 150 && r < 60 && b > 45 && b < 120) green++
+            }
+            return red > 25 && blue > 50 && green > 50
+          }).every(Boolean)
+        })
+        return painted && (await frame.getByText('Normal Markdown', { exact: true }).filter({ visible: true }).count()) > 0
+      }, mode + ' did not paint compressed and plain drawing embeds with their original and imported attachments', 12000).catch(async error => {
+        console.error('Preview cards:', await frame.locator('.vsidian-embed-card').evaluateAll(cards => cards.map(card => ({
+          text: card.textContent?.slice(0, 230),
+          images: [...card.querySelectorAll('img')].map(img => [img.alt, img.complete, img.naturalWidth, img.naturalHeight]),
+        }))))
+        await page.screenshot({ path: path.join(session, 'vscode-gallery-failure.png') })
+        throw error
+      })
+      assert.equal((await command('snapshot', gallery)).source, gallerySource)
+      await page.screenshot({ path: path.join(session, 'vscode-gallery-' + mode.toLowerCase() + '.png') })
+      console.log('PASS: ' + mode + ' paints two drawings with attachments and leaves the normal note embed in place')
+      if (i === 0) await toggle.click({ timeout: 5000 })
+    }
+    await frame.locator('img[data-excalidraw-preview]:visible').first().click()
+    await hasView(boardView, cases[0])
+    assert.equal((await command('snapshot', cases[0])).source, sources[0])
+    assert.equal((await command('snapshot', cases[1])).source, sources[1])
+    console.log('PASS: preview opens the source board without rewriting any note')
+    await command('stop')
+    return
+  }
+
   if (stage === 'create') {
     await createFlow(page, command, frameWith, hasView)
     await command('stop')
     return
   }
 
-  await command('default', 'Readme.md')
-  await hasView(markdownView, 'Readme.md')
-  console.log('PASS: ordinary Markdown still opens in Vsidian')
+  if (stage === 'image-batches') {
+    const file = slowImageBoard
+    const bytes = 5 * 1024 * 1024
+    await command('board', file)
+    await hasView(boardView, file)
+    const frame = await frameWith('.board-toolbar')
+    const button = name => frame.locator('.board-toolbar').getByRole('button', { name, exact: true })
+    await button('Edit drawing').click()
+    await frame.evaluate(async size => {
+      const swatch = document.createElement('canvas')
+      swatch.width = 64
+      swatch.height = 48
+      const ctx = swatch.getContext('2d')
+      const files = []
+      for (const color of ['#19ba50', '#2266cc']) {
+        ctx.fillStyle = color
+        ctx.fillRect(0, 0, swatch.width, swatch.height)
+        const png = await new Promise(resolve => swatch.toBlob(resolve, 'image/png'))
+        // Pad after IEND to control the transport size without expensive pixel decoding.
+        files.push(new File([png, new Uint8Array(size - png.size)], color + '.png', { type: 'image/png' }))
+      }
+      const decoded = new Set()
+      const decode = Image.prototype.decode
+      Image.prototype.decode = async function () {
+        await decode.call(this)
+        if (this.src.startsWith('data:image/png;base64,') && this.src.length > size) decoded.add(this.src.slice(0, 512))
+      }
+      const state = window.imageBatches = {
+        decoded, failures: [],
+        send(method, ...indexes) {
+          const transfer = new DataTransfer()
+          for (const index of indexes) transfer.items.add(files[index])
+          const canvas = document.querySelector('.excalidraw canvas.interactive')
+          const box = canvas.getBoundingClientRect()
+          const options = { bubbles: true, cancelable: true }
+          canvas.dispatchEvent(method === 'paste'
+            ? new ClipboardEvent('paste', { ...options, clipboardData: transfer })
+            : new DragEvent('drop', { ...options, dataTransfer: transfer, clientX: box.left + 150, clientY: box.top + 290 }))
+        },
+        release() {
+          Image.prototype.decode = decode
+          state.released = true
+          state.held()
+        },
+      }
+      // Delay the real result at the outer webview's delivery boundary.
+      const post = window.postMessage
+      window.postMessage = function (data, ...args) {
+        if (data?.kind === 'result') {
+          if (data.reason) state.failures.push(data.reason)
+          if (!state.released && data.id === 1) {
+            state.held = () => post.call(this, data, ...args)
+            return
+          }
+        }
+        post.call(this, data, ...args)
+      }
+    }, bytes)
+    const box = await frame.locator('canvas.interactive').boundingBox()
+    assert(box)
+    await page.mouse.click(box.x + 150, box.y + 220)
+    await page.keyboard.press('r')
+    await page.mouse.move(box.x + 150, box.y + 220)
+    await page.mouse.down()
+    await page.mouse.move(box.x + 205, box.y + 265, { steps: 4 })
+    await page.mouse.up()
+    await frame.waitForFunction(() => typeof window.imageBatches.held === 'function', undefined, { timeout: 6000 })
+    const drawing = async () => readDrawing((await command('snapshot', file)).source)
+    const liveImages = current => current.scene.elements.filter(el => el.type === 'image' && !el.isDeleted).map(el => el.fileId)
+    assert((await drawing()).scene.elements.some(el => el.type === 'rectangle' && !el.isDeleted))
+
+    await frame.evaluate(() => window.imageBatches.send('paste', 0, 1))
+    await frame.getByText('up to 8 MiB at a time', { exact: false }).waitFor({ state: 'visible' })
+    await frame.evaluate(() => {
+      window.imageBatches.send('paste', 0)
+      window.imageBatches.send('drop', 1)
+    })
+    await frame.waitForFunction(() => window.imageBatches.decoded.size === 2)
+    assert.deepEqual(liveImages(await drawing()), [], 'The ordinary write must still be in flight on the board')
+    await frame.evaluate(() => window.imageBatches.release())
+    const imported = await retry(async () => {
+      const reasons = await frame.evaluate(() => window.imageBatches.failures)
+      assert.deepEqual(reasons, [], 'Two allowed imports were rejected while the first write was pending')
+      const current = await drawing()
+      return liveImages(current).length === 2 && current
+    }, 'The two 5 MiB imports did not both reach the document')
+    const ids = liveImages(imported)
+    const targets = ids.map(id => path.join(vault, imported.attachments.get(id)))
+    const check = (count, reason) => retry(async () => {
+      const current = await drawing()
+      assert(current.scene.elements.some(el => el.type === 'rectangle' && !el.isDeleted), 'Undo changed the earlier rectangle')
+      const lengths = await Promise.all(targets.map(target => stat(target).then(file => file.size, error => {
+        if (error.code === 'ENOENT') return 0
+        throw error
+      })))
+      return JSON.stringify(liveImages(current)) === JSON.stringify(ids.slice(0, count))
+        && current.attachments.size === count && ids.slice(0, count).every(id => current.attachments.has(id))
+        && lengths.every((size, i) => size === (i < count ? bytes : 0))
+    }, reason)
+    await check(2, 'Both image elements and their full-size attachments must be written')
+    for (const [action, count] of [['Undo', 1], ['Undo', 0], ['Redo', 1], ['Redo', 2]]) {
+      await button(action).click()
+      await check(count, action + ' must change exactly one import and its attachment')
+    }
+    await button('Save').click()
+    await retry(async () => readDrawing(await readFile(path.join(vault, file), 'utf8')).attachments.size === 2,
+      'Saving did not persist both imported images')
+    console.log('PASS: two 5 MiB imports behind a held write each save, undo and redo; a single 10 MiB paste is rejected')
+    await command('stop')
+    return
+  }
+
+  if (stage === 'image-import' || stage === 'image-return') {
+    for (const [i, file] of cases.entries()) {
+      await command('board', file)
+      await hasView(boardView, file)
+      const frame = await frameWith('.board-toolbar')
+      const button = name => frame.locator('.board-toolbar').getByRole('button', { name, exact: true })
+      await retry(() => button('Edit drawing').isEnabled(), 'The image test board did not initialize')
+      if (stage === 'image-return') {
+        await retry(() => frame.evaluate(readPaint, true), 'Imported image did not paint after Obsidian saved the drawing')
+        assert(!(await command('snapshot', file)).dirty)
+        console.log('PASS: Vsidian paints both attachments after the Obsidian save', file)
+        continue
+      }
+      const method = i === 0 ? 'paste' : 'drop'
+      const before = readDrawing((await command('snapshot', file)).source)
+      await button('Edit drawing').click()
+      const area = await frame.locator('.excalidraw').boundingBox()
+      assert(area)
+      await page.mouse.click(area.x + 130, area.y + 220)
+      await frame.evaluate(async method => {
+        const swatch = document.createElement('canvas')
+        swatch.width = 64
+        swatch.height = 48
+        const context = swatch.getContext('2d')
+        context.fillStyle = '#19ba50'
+        context.fillRect(0, 0, 64, 48)
+        const image = await new Promise(resolve => swatch.toBlob(resolve, 'image/png'))
+        const transfer = new DataTransfer()
+        transfer.items.add(new File([image], 'capture.png', { type: 'image/png' }))
+        const canvas = document.querySelector('.excalidraw canvas.interactive') ?? document.querySelector('.excalidraw canvas')
+        const bounds = canvas.getBoundingClientRect()
+        if (method === 'paste') {
+          canvas.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer }))
+        } else {
+          canvas.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer,
+            clientX: bounds.left + 130, clientY: bounds.top + 220 }))
+        }
+      }, method)
+      const imported = await retry(async () => {
+        const doc = await command('snapshot', file)
+        const drawing = readDrawing(doc.source)
+        const element = drawing.scene.elements.find(el => el.type === 'image' && !el.isDeleted
+          && !before.scene.elements.some(original => original.id === el.id))
+        return doc.dirty && element && drawing.attachments.has(element.fileId) && { drawing, element }
+      }, 'Import by ' + method + ' did not write a referenced image into the open drawing', 5500)
+      const target = imported.drawing.attachments.get(imported.element.fileId)
+      assert.equal(imported.drawing.payload.kind, before.payload.kind)
+      assert(!imported.drawing.stored.files?.[imported.element.fileId], 'The attachment was duplicated inside the scene')
+      const png = await readFile(path.join(vault, target))
+      assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
+      await retry(() => frame.evaluate(readPaint, true), 'The imported image did not paint in VS Code')
+      await button('Undo').click()
+      await retry(async () => !readDrawing((await command('snapshot', file)).source).attachments.has(imported.element.fileId),
+        'Undo did not take out the newly inserted image reference')
+      await retry(async () => {
+        try { await readFile(path.join(vault, target)); return false }
+        catch (error) { if (error.code === 'ENOENT') return true; throw error }
+      }, 'Undo did not remove the single newly created attachment')
+      await button('Redo').click()
+      await retry(async () => readDrawing((await command('snapshot', file)).source).attachments.has(imported.element.fileId),
+        'Redo did not restore the newly inserted image reference')
+      assert((await readFile(path.join(vault, target))).equals(png), 'Redo did not restore the PNG contents')
+      await retry(() => button('Save').isEnabled(), 'The drawing did not become saveable after redo', 5000).catch(async error => {
+        console.error('After redoing the image import:', await frame.locator('.board-mode').innerText(),
+          await frame.locator('.board-notice').allTextContents())
+        await page.screenshot({ path: path.join(session, 'vscode-image-redo-failure.png') })
+        throw error
+      })
+      await button('Save').click()
+      const disk = await retry(async () => {
+        const source = await readFile(path.join(vault, file), 'utf8')
+        return readDrawing(source).attachments.has(imported.element.fileId) && source
+      }, 'Saving did not persist the imported image')
+      await writeFile(path.join(session, file + '.with-import'), disk)
+      await page.screenshot({ path: path.join(session, 'vscode-image-' + i + '.png') })
+      console.log('PASS: VS Code ' + method + ', image pixels, grouped undo/redo and save:', file, target)
+    }
+    await command('stop')
+    return
+  }
+
+  for (const [file, heading] of [['Tagged.excalidraw.md', 'A note about Excalidraw'],
+    [incomplete, incompleteHeading]]) {
+    await command('default', file)
+    await hasView(markdownView, file)
+    const frame = await frameWith('.cm-content, .markdown-preview-view')
+    await frame.getByText(heading, { exact: true }).first().waitFor({ state: 'visible', timeout: 5000 })
+  }
+  console.log('PASS: a plain tag or an incomplete scene does not replace the Markdown editor')
+  const openBoard = page.getByRole('button', { name: /Open in Excalidraw Board/ })
   for (const [i, file] of cases.entries()) {
-    await command('markdown', file)
+    await command('default', file)
+    await hasView(boardView, file)
+    const firstBoard = await frameWith('.board-toolbar')
+    await retry(() => firstBoard.evaluate(readPaint), 'The default drawing view did not paint ' + file)
+    await firstBoard.getByRole('button', { name: 'Open Markdown', exact: true }).click()
     await hasView(markdownView, file)
     await frameWith('.cm-content, .markdown-preview-view')
     await retry(async () => {
@@ -332,8 +981,9 @@ async function vscodeFlow(page) {
         if (await note.isVisible()) return true
       }
     }, 'The original note was not visible in the Markdown view')
-    await command('board', file)
+    await openBoard.click({ timeout: 5000 })
     await hasView(boardView, file)
+    console.log('PASS: default canvas and both visible switches', file)
     const frame = await frameWith('.board-toolbar')
     const boardButton = text => frame.locator('.board-toolbar').getByRole('button', { name: text, exact: true })
     await boardButton('Edit drawing').waitFor({ state: 'visible' })
@@ -413,7 +1063,7 @@ async function vscodeFlow(page) {
     const unsaved = await hasView(markdownView, file)
     assert(unsaved.source.includes(editedLabel + ' ^') && unsaved.dirty, 'Switching to Markdown lost unsaved changes')
     assert(unsaved.source.includes(invariant))
-    await command('board', file)
+    await openBoard.click({ timeout: 5000 })
     await hasView(boardView, file)
     if (await boardButton('Edit drawing').count()) await boardButton('Edit drawing').click()
     await boardButton('Save').click()
@@ -439,24 +1089,65 @@ async function readJson(file) {
     if (error.code !== 'ENOENT') throw error
   }
 }
-function readPaint() {
+function readPaint(requireGreen = false) {
   for (const canvas of document.querySelectorAll('.excalidraw canvas')) {
     if (canvas.width < 100 || canvas.height < 100) continue
     const ctx = canvas.getContext('2d')
     if (!ctx) continue
     const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
-    let left = canvas.width, right = 0, top = canvas.height, bottom = 0, blue = 0
+    let left = canvas.width, right = 0, top = canvas.height, bottom = 0, blue = 0, green = 0
     for (let p = 0; p < data.length; p += 4) {
       const r = data[p], g = data[p + 1], b = data[p + 2], a = data[p + 3]
       if (a > 180 && b > 155 && r < 60 && g > 60 && g < 125) blue++
+      if (a > 180 && g > 150 && r < 60 && b > 45 && b < 120) green++
       if (a > 180 && r > 160 && g < 80 && b < 80) {
         const x = (p / 4) % canvas.width, y = Math.floor((p / 4) / canvas.width)
         left = Math.min(left, x); right = Math.max(right, x)
         top = Math.min(top, y); bottom = Math.max(bottom, y)
       }
     }
-    if (right > left && blue > 50) return { left, right, top, bottom, blue, width: canvas.width, height: canvas.height }
+    if (right > left && blue > 50 && (!requireGreen || green > 50)) return { left, right, top, bottom, blue, green, width: canvas.width, height: canvas.height }
   }
+}
+
+function hasSecondPdfPage() {
+  for (const [index, canvas] of Array.from(document.querySelectorAll('.excalidraw canvas')).entries()) {
+    if (!canvas.width || !canvas.height) continue
+    const ctx = canvas.getContext('2d')
+    if (!ctx) continue
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    let secondPage = 0, firstPage = 0, xSum = 0, top = canvas.height
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 200) continue
+      if (data[i] > 175 && data[i + 1] < 55 && data[i + 2] > 140) {
+        secondPage++
+        xSum += (i / 4) % canvas.width
+        top = Math.min(top, Math.floor(i / 4 / canvas.width))
+      }
+      if (data[i] > 210 && data[i + 1] > 130 && data[i + 2] < 75) firstPage++
+    }
+    // Click near the top of the visible artwork, above the board's floating bottom bar.
+    if (secondPage > 100 && firstPage === 0) return { canvas: index, x: xSum / secondPage / canvas.width, y: (top + 5) / canvas.height }
+  }
+  return false
+}
+
+function fixturePdf() {
+  // Two pages with different solid artwork, so a header or page number cannot pass the paint assertion.
+  const streams = ['1 .70 .05 rg 20 20 100 70 re f\n', '.78 .07 .66 rg 20 20 100 70 re f\n']
+  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >>',
+    ...[5, 6].map(n => '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 140 110] /Resources <<>> /Contents ' + n + ' 0 R >>'),
+    ...streams.map(s => '<< /Length ' + s.length + ' >>\nstream\n' + s + 'endstream')]
+  let pdf = '%PDF-1.4\n'
+  const offsets = [0]
+  for (const [i, object] of objects.entries()) {
+    offsets.push(pdf.length)
+    pdf += (i + 1) + ' 0 obj\n' + object + '\nendobj\n'
+  }
+  const xref = pdf.length
+  pdf += 'xref\n0 ' + offsets.length + '\n0000000000 65535 f \n' + offsets.slice(1)
+    .map(offset => String(offset).padStart(10, '0') + ' 00000 n \n').join('')
+  return Buffer.from(pdf + 'trailer\n<< /Size ' + offsets.length + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n')
 }
 async function createFlow(page, command, frameWith, hasView) {
   const file = 'Drawing.excalidraw.md'

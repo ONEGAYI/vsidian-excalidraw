@@ -195,3 +195,25 @@ test('第一段文字紧接标题，不在 Obsidian 中引入额外的段首换�
   }
   assert.match(source, /## Text Elements\nCreated in Vsidian · 双平台 \^textabcd\n/)
 })
+
+test('新图片通过 Embedded Files 引用同库附件，已有附件及绘图编码不变', async () => {
+  const { newDrawing, writeDrawing, readDrawing } = await import('../src/format.ts')
+  const image = '1234567890abcdef1234567890abcdef'
+  const target = 'excalidraw-' + image + '.png'
+  for (const source of [newDrawing(), fixture('compressed-json')]) {
+    const original = readDrawing(source)
+    const edits = writeDrawing(source, {
+      elements: [{ id: 'newimage', fields: { type: 'image', fileId: image } }],
+      attachments: [{ id: image, target }],
+    })
+    let saved = source
+    for (const edit of edits.sort((a, b) => b.from - a.from)) {
+      saved = saved.slice(0, edit.from) + edit.text + saved.slice(edit.to)
+    }
+    const next = readDrawing(saved)
+    assert.equal(next.payload.kind, original.payload.kind)
+    assert.deepEqual([...next.attachments], [...original.attachments, [image, target]])
+    assert.equal(next.stored.elements.find(el => el.id === 'newimage').fileId, image)
+    assert.deepEqual(next.stored.files, original.stored.files)
+  }
+})
