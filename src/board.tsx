@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Element, Scene } from './format.ts'
 import { imageImportLimit, importedImageTypes, type ImportedImage, type Message, type Request, type State } from './protocol.ts'
-import { canPasteSceneElements, createSceneDiff, displayElements, isPortableText } from './scene.ts'
+import { canPasteSceneElements, createSceneDiff, displayElements, isPortableText, projectCanvasElement } from './scene.ts'
 import { strings } from './strings.ts'
 import { renderReferenceImages } from './reference-art.ts'
 import { webLink } from './web.ts'
@@ -397,6 +397,7 @@ function render() {
           if (element.link) bridge.postMessage({ kind: 'link', link: element.link })
         }}
         onPaste={(data, event) => !event?.clipboardData?.files.length && canPasteSceneElements(data.elements)}
+        onDuplicate={elements => elements.map(projectCanvasElement)}
         validateEmbeddable={link => !!webLink(link) || (doc?.scene?.elements.some(element => element.link === link
           && Object.hasOwn(doc?.references?.cards ?? {}, element.id)) ?? false)}
         renderEmbeddable={element => {

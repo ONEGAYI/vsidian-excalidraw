@@ -122,8 +122,11 @@ export async function activate(context: ExtensionContext) {
     let sequence = Promise.resolve()
     const post = (message: Message) => panel.webview.postMessage(message)
     let disposed = false
-    async function publish(force = false) {
-      if (disposed || !ready) return
+    let publishRevision = 0
+    let queuedForce: boolean | undefined
+    let publishing: Promise<void> | undefined
+
+    async function sendState(force: boolean, request: number) {
       const version = document.version
       const state: Message = { kind: 'state', version, dirty: document.isDirty, enabled, missing: [], force }
       if (enabled) {
@@ -137,10 +140,34 @@ export async function activate(context: ExtensionContext) {
           report(error)
         }
       }
+      if (disposed || request !== publishRevision || document.version !== version) return false
       // Undo/redo can change dirty state while the scene's attachments are being read.
-      if (!disposed && document.version === version && enabled === state.enabled) await post({ ...state, dirty: document.isDirty })
+      return post({ ...state, dirty: document.isDirty })
     }
-    const refresh = () => { void publish() }
+
+    function publish(force = false) {
+      if (disposed || !ready) return
+      const request = ++publishRevision
+      if (!enabled) {
+        queuedForce = undefined
+        return sendState(force, request)
+      }
+      queuedForce = force || queuedForce === true
+      // A retained board can see several edits while a single set of attachments is loading.
+      return publishing ??= Promise.resolve().then(async () => {
+        try {
+          while (!disposed && queuedForce !== undefined) {
+            const force = queuedForce
+            queuedForce = undefined
+            const sent = await sendState(force, publishRevision)
+            if (!sent && force && queuedForce !== undefined) queuedForce = true
+          }
+        } finally {
+          publishing = undefined
+        }
+      })
+    }
+    const refresh = () => { void publish()?.catch(report) }
     const sendPolicy = () => ready && !disposed
       ? post({ kind: 'web-policy', origins: webOrigins.filter(origin => frameSources.has(origin)) }) : undefined
     const refreshPolicy = () => { void sendPolicy() }
@@ -247,7 +274,7 @@ export async function activate(context: ExtensionContext) {
         if (!event.contentChanges.length || document.getText() === applying) {
           if (ready) void post({ kind: 'status', dirty: document.isDirty })
         } else {
-          void publish()
+          refresh()
         }
       }),
       workspace.onDidSaveTextDocument(saved => {

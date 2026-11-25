@@ -46,3 +46,13 @@ test('画板剪贴板允许普通元素，但拒绝绕过导入入口的图片�
   assert.equal(canPasteSceneElements([{ type: 'rectangle' }, { type: 'image' }]), false)
   assert.equal(canPasteSceneElements([{ type: 'rectangle' }, { type: 'iframe' }]), false)
 })
+
+test('插入前将素材中的原始 HTML 帧投影为矩形，不修改源素材或其他元素', async () => {
+  const { projectCanvasElement } = await import('../src/scene.ts')
+  const native = { id: 'shape001', type: 'ellipse', x: 20, y: 30 }
+  const frame = { id: 'shape002', type: 'iframe', x: 10, y: 18 }
+  const [shown, kept] = [frame, native].map(projectCanvasElement)
+  assert.deepEqual(shown, { ...frame, type: 'rectangle' })
+  assert.equal(frame.type, 'iframe')
+  assert.equal(kept, native)
+})

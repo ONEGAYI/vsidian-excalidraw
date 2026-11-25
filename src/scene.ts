@@ -6,13 +6,16 @@ export const isPortableElementId = (id: string): boolean => /^[A-Za-z0-9-]{8}$/.
 
 // Excalidraw renders generated iframe HTML independently of validateEmbeddable.
 // Project only what the renderer sees; diffs still preserve the source type and custom data.
+export function projectCanvasElement<T extends { type: string }>(element: T) {
+  return element.type === 'iframe' ? { ...element, type: 'rectangle' as const } : element
+}
+
 export function displayElements(elements: readonly Element[], sourceLinks: Readonly<Record<string, string>> = {}): Element[] {
   return elements.map(element => {
-    if (element.type === 'iframe') return { ...element, type: 'rectangle' }
     if (element.type === 'image' && !element.link && element.fileId && Object.hasOwn(sourceLinks, element.fileId)) {
       return { ...element, link: sourceLinks[element.fileId] }
     }
-    return element
+    return projectCanvasElement(element)
   })
 }
 
